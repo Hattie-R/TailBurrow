@@ -41,6 +41,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
 
     CREATE INDEX IF NOT EXISTS idx_items_added_at ON items(added_at);
     CREATE INDEX IF NOT EXISTS idx_items_trashed_at ON items(trashed_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_items_md5 ON items(md5) WHERE md5 IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS tags (
       tag_id INTEGER PRIMARY KEY,
@@ -76,6 +77,17 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS unavailable_posts (
+      row_id       INTEGER PRIMARY KEY,
+      source       TEXT NOT NULL,
+      source_id    TEXT NOT NULL,
+      seen_at      TEXT NOT NULL,
+      reason       TEXT NOT NULL,
+      sources_json TEXT NOT NULL,
+      UNIQUE(source, source_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_unavailable_seen_at ON unavailable_posts(seen_at);
+
     "#,
   )
   .map_err(|e| e.to_string())?;

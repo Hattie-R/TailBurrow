@@ -1,16 +1,45 @@
 use crate::{config, db, library};
 use chrono::Utc;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, Row, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use tauri::AppHandle;
 use tauri_plugin_fs::FsExt;
 use tauri::Manager;
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+
 
 fn get_root(app: &AppHandle) -> Result<PathBuf, String> {
   let cfg = config::load_config(app)?;
   let root = cfg.library_root.ok_or("Library root not set yet")?;
   Ok(PathBuf::from(root))
+}
+
+fn open_conn_for_root(root: &PathBuf) -> Result<Connection, String> {
+  let conn = db::open(&library::db_path(root))?;
+  db::init_schema(&conn)?;
+  Ok(conn)
+}
+
+fn settings_get(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+  let v: Option<String> = conn
+    .query_row(
+      "SELECT value FROM settings WHERE key=?",
+      params![key],
+      |r: &Row| r.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())?;
+  Ok(v)
+}
+
+fn settings_set(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+  conn.execute(
+    "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    params![key, value],
+  ).map_err(|e| e.to_string())?;
+  Ok(())
 }
 
 fn sanitize_slug(s: &str) -> String {
@@ -39,31 +68,6 @@ pub struct Status {
   pub message: String,
 }
 
-#[derive(Serialize)]
-pub struct ImportResult {
-  pub imported: u32,
-  pub skipped: u32,
-  pub missing_files: u32,
-  pub errors: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct JsonDb {
-  items: Vec<JsonItem>,
-}
-
-#[derive(Deserialize)]
-struct JsonItem {
-  source: Option<String>,
-  id: serde_json::Value,
-  url: Option<String>,
-  tags: Option<Vec<String>>,
-  rating: Option<String>,
-  artist: Option<Vec<String>>,
-  timestamp: Option<String>,
-  local_path: Option<String>,
-  sources: Option<Vec<String>>,
-}
 
 #[derive(Serialize)]
 pub struct ItemDto {
@@ -81,6 +85,99 @@ pub struct ItemDto {
   pub score_total: Option<i64>,
   pub timestamp: Option<String>,
   pub added_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct E621Tags {
+  pub general: Vec<String>,
+  pub species: Vec<String>,
+  pub character: Vec<String>,
+  pub artist: Vec<String>,
+  pub meta: Vec<String>,
+  pub lore: Vec<String>,
+  pub copyright: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct E621PostInput {
+  pub id: i64,
+  pub file_url: String,
+  pub file_ext: String,
+  pub file_md5: Option<String>,
+  pub rating: Option<String>,
+  pub fav_count: Option<i64>,
+  pub score_total: Option<i64>,
+  pub created_at: Option<String>,
+  pub sources: Vec<String>,
+  pub tags: E621Tags,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SyncStatus {
+  pub running: bool,
+  pub cancelled: bool,
+  pub max_new_downloads: Option<u32>,
+
+  pub scanned_pages: u32,
+  pub scanned_posts: u32,
+  pub skipped_existing: u32,
+
+  pub new_attempted: u32,
+  pub downloaded_ok: u32,
+  pub failed_downloads: u32,
+  pub unavailable: u32,
+
+  pub last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct UnavailableDto {
+  pub source: String,
+  pub source_id: String,
+  pub seen_at: String,
+  pub reason: String,
+  pub sources: Vec<String>,
+}
+
+#[tauri::command]
+pub fn e621_unavailable_list(app: AppHandle, limit: u32) -> Result<Vec<UnavailableDto>, String> {
+  let root = get_root(&app)?;
+  let conn = db::open(&library::db_path(&root))?;
+  db::init_schema(&conn)?;
+
+  let mut stmt = conn.prepare(
+    r#"
+    SELECT source, source_id, seen_at, reason, sources_json
+    FROM unavailable_posts
+    ORDER BY seen_at DESC
+    LIMIT ?
+    "#
+  ).map_err(|e| e.to_string())?;
+
+  let rows = stmt.query_map([limit], |r| {
+    let sources_json: String = r.get(4)?;
+    let sources: Vec<String> = serde_json::from_str(&sources_json).unwrap_or_default();
+
+    Ok(UnavailableDto {
+      source: r.get(0)?,
+      source_id: r.get(1)?,
+      seen_at: r.get(2)?,
+      reason: r.get(3)?,
+      sources,
+    })
+  }).map_err(|e| e.to_string())?;
+
+  let mut out = vec![];
+  for row in rows {
+    out.push(row.map_err(|e| e.to_string())?);
+  }
+  Ok(out)
+}
+
+#[derive(Default)]
+pub struct SyncState {
+  pub status: SyncStatus,
+  pub cancel_requested: bool,
 }
 
 #[tauri::command]
@@ -121,6 +218,517 @@ pub fn set_library_root(app: AppHandle, library_root: String) -> Result<Status, 
     ok: true,
     message: "Library root set and DB initialized".into(),
   })
+}
+
+#[tauri::command]
+pub fn add_e621_post(app: AppHandle, post: E621PostInput) -> Result<Status, String> {
+  let root = get_root(&app)?;
+  library::ensure_layout(&root)?;
+
+  let conn = db::open(&library::db_path(&root))?;
+  db::init_schema(&conn)?;
+
+  // dedupe by (source, id)
+  let exists: i64 = conn
+    .query_row(
+      "SELECT COUNT(*) FROM items WHERE source='e621' AND source_id=? AND trashed_at IS NULL",
+      params![post.id.to_string()],
+      |r: &Row| r.get(0),
+    )
+    .map_err(|e| e.to_string())?;
+  if exists > 0 {
+    return Ok(Status { ok: true, message: "Already downloaded".into() });
+  }
+
+  // dedupe by md5 if present
+  if let Some(md5) = &post.file_md5 {
+    let md5_exists: i64 = conn
+      .query_row(
+        "SELECT COUNT(*) FROM items WHERE md5=? AND trashed_at IS NULL",
+        params![md5],
+        |r: &Row| r.get(0),
+      )
+      .map_err(|e| e.to_string())?;
+    if md5_exists > 0 {
+      return Ok(Status { ok: true, message: "Already downloaded (md5 match)".into() });
+    }
+  }
+
+  // filename: primaryArtist_e621_<id>.<ext>
+  let primary_artist = sanitize_slug(&pick_primary_artist(&post.tags.artist));
+  let ext = post.file_ext.trim().to_lowercase();
+  if ext.is_empty() {
+    return Err("Missing file_ext from e621".into());
+  }
+
+  let base = format!("{primary_artist}_e621_{}.{}", post.id, ext);
+  let media_dir = root.join("media");
+  let mut filename = base.clone();
+  let mut dest_path = media_dir.join(&filename);
+
+  // ensure unique filename
+  let mut n = 1;
+  while dest_path.exists() {
+    filename = format!("{primary_artist}_e621_{}_dup{}.{}", post.id, n, ext);
+    dest_path = media_dir.join(&filename);
+    n += 1;
+  }
+
+  // temp download
+  let tmp_dir = root.join("cache").join("tmp");
+  fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+  let tmp_path = tmp_dir.join(format!("{filename}.part"));
+
+  let client = reqwest::blocking::Client::new();
+  let mut resp = client
+    .get(&post.file_url)
+    .header("User-Agent", "Guacamole Viewer/0.1.0 (local archiver)")
+    .send()
+    .map_err(|e| e.to_string())?;
+
+  if !resp.status().is_success() {
+    return Err(format!("Download failed: HTTP {}", resp.status()));
+  }
+
+  let mut file = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+  std::io::copy(&mut resp, &mut file).map_err(|e| e.to_string())?;
+  file.flush().map_err(|e| e.to_string())?;
+
+  fs::rename(&tmp_path, &dest_path).map_err(|e| e.to_string())?;
+
+  let file_rel = format!("media/{}", filename.replace('\\', "/"));
+  let added_at = Utc::now().to_rfc3339();
+
+  conn.execute(
+    r#"
+    INSERT INTO items(source, source_id, md5, remote_url, file_rel, ext, rating, fav_count, score_total, created_at, added_at, primary_artist)
+    VALUES('e621', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    "#,
+    params![
+      post.id.to_string(),
+      post.file_md5,
+      post.file_url,
+      file_rel,
+      ext,
+      post.rating,
+      post.fav_count,
+      post.score_total,
+      post.created_at,
+      added_at,
+      primary_artist
+    ],
+  ).map_err(|e| e.to_string())?;
+
+  let item_id = conn.last_insert_rowid();
+
+  // typed tags
+  for t in post.tags.general { let id = upsert_tag(&conn, &t, "general")?; conn.execute("INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?,?)", params![item_id, id]).map_err(|e| e.to_string())?; }
+  for t in post.tags.species { let id = upsert_tag(&conn, &t, "species")?; conn.execute("INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?,?)", params![item_id, id]).map_err(|e| e.to_string())?; }
+  for t in post.tags.character { let id = upsert_tag(&conn, &t, "character")?; conn.execute("INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?,?)", params![item_id, id]).map_err(|e| e.to_string())?; }
+  for t in post.tags.artist { let id = upsert_tag(&conn, &t, "artist")?; conn.execute("INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?,?)", params![item_id, id]).map_err(|e| e.to_string())?; }
+  for t in post.tags.meta { let id = upsert_tag(&conn, &t, "meta")?; conn.execute("INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?,?)", params![item_id, id]).map_err(|e| e.to_string())?; }
+  for t in post.tags.lore { let id = upsert_tag(&conn, &t, "lore")?; conn.execute("INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?,?)", params![item_id, id]).map_err(|e| e.to_string())?; }
+  for t in post.tags.copyright { let id = upsert_tag(&conn, &t, "copyright")?; conn.execute("INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?,?)", params![item_id, id]).map_err(|e| e.to_string())?; }
+
+  // sources urls
+  for u in post.sources {
+    let sid = upsert_source(&conn, &u)?;
+    conn.execute(
+      "INSERT OR IGNORE INTO item_sources(item_id, source_row_id) VALUES(?, ?)",
+      params![item_id, sid],
+    ).map_err(|e| e.to_string())?;
+  }
+
+  Ok(Status { ok: true, message: "Downloaded into library".into() })
+}
+
+#[derive(Serialize)]
+pub struct E621CredInfo {
+  pub username: Option<String>,
+  pub has_api_key: bool,
+}
+
+fn load_e621_creds(conn: &Connection) -> Result<(String, String), String> {
+  let username = settings_get(conn, "e621_username")?
+    .ok_or("e621 username not set")?;
+  let api_key = settings_get(conn, "e621_api_key")?
+    .ok_or("e621 api key not set")?;
+  Ok((username, api_key))
+}
+
+fn upsert_unavailable(
+  conn: &Connection,
+  source: &str,
+  source_id: &str,
+  reason: &str,
+  sources: Vec<String>,
+) -> Result<(), String> {
+  let seen_at = Utc::now().to_rfc3339();
+  let sources_json = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
+
+  conn.execute(
+    r#"
+    INSERT INTO unavailable_posts(source, source_id, seen_at, reason, sources_json)
+    VALUES(?, ?, ?, ?, ?)
+    ON CONFLICT(source, source_id)
+    DO UPDATE SET seen_at=excluded.seen_at, reason=excluded.reason, sources_json=excluded.sources_json
+    "#,
+    params![source, source_id, seen_at, reason, sources_json],
+  ).map_err(|e| e.to_string())?;
+
+  Ok(())
+}
+
+#[tauri::command]
+pub fn e621_get_cred_info(app: AppHandle) -> Result<E621CredInfo, String> {
+  let root = get_root(&app)?;
+  let conn = open_conn_for_root(&root)?;
+  let username = settings_get(&conn, "e621_username")?;
+  let has_api_key = settings_get(&conn, "e621_api_key")?.is_some();
+  Ok(E621CredInfo { username, has_api_key })
+}
+
+#[tauri::command]
+pub fn e621_set_credentials(app: AppHandle, username: String, api_key: String) -> Result<Status, String> {
+  let root = get_root(&app)?;
+  let conn = open_conn_for_root(&root)?;
+
+  let u = username.trim();
+  if u.is_empty() {
+    return Err("Username cannot be empty".into());
+  }
+  settings_set(&conn, "e621_username", u)?;
+
+  // allow leaving api_key blank to keep existing key
+  if !api_key.trim().is_empty() {
+    settings_set(&conn, "e621_api_key", api_key.trim())?;
+  }
+
+  Ok(Status { ok: true, message: "Saved e621 credentials".into() })
+}
+
+#[tauri::command]
+pub fn e621_test_connection(app: AppHandle) -> Result<Status, String> {
+  let root = get_root(&app)?;
+  let conn = open_conn_for_root(&root)?;
+  let (username, api_key) = load_e621_creds(&conn)?;
+
+  let client = reqwest::blocking::Client::new();
+  let resp = client
+    .get("https://e621.net/posts.json")
+    .basic_auth(username, Some(api_key))
+    .header("User-Agent", "Guacamole Viewer/0.1.0 (test)")
+    .query(&[("limit", "1"), ("tags", "order:id_desc")])
+    .send()
+    .map_err(|e| e.to_string())?;
+
+  if !resp.status().is_success() {
+    return Err(format!("Test failed: HTTP {}", resp.status()));
+  }
+
+  Ok(Status { ok: true, message: "Connected to e621 successfully".into() })
+}
+
+#[tauri::command]
+pub fn e621_fetch_posts(app: AppHandle, tags: String, limit: u32, page: Option<String>) -> Result<serde_json::Value, String> {
+  let root = get_root(&app)?;
+  let conn = open_conn_for_root(&root)?;
+  let (username, api_key) = load_e621_creds(&conn)?;
+
+  let client = reqwest::blocking::Client::new();
+  let mut req = client
+    .get("https://e621.net/posts.json")
+    .basic_auth(username, Some(api_key))
+    .header("User-Agent", "Guacamole Viewer/0.1.0 (feeds)")
+    .query(&[("tags", tags), ("limit", limit.to_string())]);
+
+  if let Some(p) = page {
+    req = req.query(&[("page", p)]);
+  }
+
+  let resp = req.send().map_err(|e| e.to_string())?;
+  if !resp.status().is_success() {
+    return Err(format!("e621 error: HTTP {}", resp.status()));
+  }
+
+  resp.json::<serde_json::Value>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn e621_sync_status(state: tauri::State<'_, Arc<Mutex<SyncState>>>) -> Result<SyncStatus, String> {
+  let st = state.lock().map_err(|_| "Sync state lock poisoned")?;
+  Ok(st.status.clone())
+}
+
+#[tauri::command]
+pub fn e621_sync_cancel(state: tauri::State<'_, Arc<Mutex<SyncState>>>) -> Result<Status, String> {
+  let mut st = state.lock().map_err(|_| "Sync state lock poisoned")?;
+  st.cancel_requested = true;
+  st.status.cancelled = true;
+  Ok(Status { ok: true, message: "Cancel requested".into() })
+}
+
+#[tauri::command]
+pub fn e621_sync_start(
+  app: AppHandle,
+  state: tauri::State<'_, Arc<Mutex<SyncState>>>,
+  max_new_downloads: Option<u32>,
+) -> Result<Status, String> {
+  {
+    let mut st = state.lock().map_err(|_| "Sync state lock poisoned")?;
+    if st.status.running {
+      return Err("Sync already running".into());
+    }
+    st.cancel_requested = false;
+    st.status = SyncStatus {
+      running: true,
+      cancelled: false,
+      max_new_downloads,
+      ..Default::default()
+    };
+  }
+
+  let app2 = app.clone();
+  let state2 = state.inner().clone();
+
+  std::thread::spawn(move || {
+    let result: Result<(), String> = (|| {
+      let root = get_root(&app2)?;
+      let conn = db::open(&library::db_path(&root))?;
+      db::init_schema(&conn)?;
+
+      // Load creds from DB settings (you already implemented e621 creds in settings)
+      // This expects keys: e621_username, e621_api_key
+      let username: String = conn.query_row(
+        "SELECT value FROM settings WHERE key='e621_username'",
+        [],
+        |r: &Row| r.get(0),
+      ).map_err(|_| "e621 username not set")?;
+
+      let api_key: String = conn.query_row(
+        "SELECT value FROM settings WHERE key='e621_api_key'",
+        [],
+        |r: &Row| r.get(0),
+      ).map_err(|_| "e621 api key not set")?;
+
+      let client = reqwest::blocking::Client::new();
+
+      let mut page: u32 = 1;
+
+      loop {
+        // cancel check
+        {
+          let st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+          if st.cancel_requested {
+            break;
+          }
+        }
+
+        // stop if hit max
+        {
+          let st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+          if let Some(maxn) = st.status.max_new_downloads {
+            if st.status.new_attempted >= maxn {
+              break;
+            }
+          }
+        }
+
+        // fetch favorites page
+        let tags = format!("fav:{} order:id_desc", username);
+        let resp = client
+          .get("https://e621.net/posts.json")
+          .basic_auth(&username, Some(&api_key))
+          .header("User-Agent", "Guacamole Viewer/0.1.0 (sync)")
+          .query(&[
+            ("tags", tags.as_str()),
+            ("limit", "320"),
+            ("page", &page.to_string()),
+          ])
+          .send()
+          .map_err(|e| e.to_string())?;
+
+        if !resp.status().is_success() {
+          return Err(format!("e621 sync API error: HTTP {}", resp.status()));
+        }
+
+        let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+        let posts = json.get("posts").and_then(|p| p.as_array()).cloned().unwrap_or_default();
+
+        {
+          let mut st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+          st.status.scanned_pages += 1;
+        }
+
+        if posts.is_empty() {
+          break;
+        }
+
+        for p in posts {
+          // cancel check
+          {
+            let st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+            if st.cancel_requested {
+              break;
+            }
+          }
+
+          {
+            let mut st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+            st.status.scanned_posts += 1;
+          }
+
+          let post_id = p.get("id").and_then(|x| x.as_i64()).unwrap_or(0);
+          if post_id == 0 {
+            continue;
+          }
+
+          // already downloaded check by (source,id)
+          let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM items WHERE source='e621' AND source_id=? AND trashed_at IS NULL",
+            params![post_id.to_string()],
+            |r: &Row| r.get(0),
+          ).map_err(|e| e.to_string())?;
+
+          if exists > 0 {
+            let mut st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+            st.status.skipped_existing += 1;
+            continue;
+          }
+
+          // md5 check (optional)
+          let md5 = p.get("file").and_then(|f| f.get("md5")).and_then(|m| m.as_str()).map(|s| s.to_string());
+          if let Some(ref m) = md5 {
+            let md5_exists: i64 = conn.query_row(
+              "SELECT COUNT(*) FROM items WHERE md5=? AND trashed_at IS NULL",
+              params![m],
+              |r: &Row| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            if md5_exists > 0 {
+              let mut st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+              st.status.skipped_existing += 1;
+              continue;
+            }
+          }
+
+          // stop after N new downloads (attempted)
+          {
+            let st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+            if let Some(maxn) = st.status.max_new_downloads {
+              if st.status.new_attempted >= maxn {
+                break;
+              }
+            }
+          }
+
+          // file.url might be missing for deleted/blocked
+          let file_url = p.get("file").and_then(|f| f.get("url")).and_then(|u| u.as_str()).map(|s| s.to_string());
+          let file_ext = p.get("file").and_then(|f| f.get("ext")).and_then(|u| u.as_str()).unwrap_or("").to_string();
+
+          let sources: Vec<String> = p.get("sources")
+            .and_then(|s| s.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
+          if file_url.is_none() {
+            upsert_unavailable(&conn, "e621", &post_id.to_string(), "missing_file_url", sources)?;
+            let mut st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+            st.status.unavailable += 1;
+            continue;
+          }
+
+          // convert to your existing E621PostInput and reuse add_e621_post
+          let tags_obj = p.get("tags").cloned().unwrap_or(serde_json::Value::Null);
+
+          let vec_from = |k: &str| -> Vec<String> {
+            tags_obj.get(k)
+              .and_then(|v| v.as_array())
+              .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+              .unwrap_or_default()
+          };
+
+          let post_input = E621PostInput {
+            id: post_id,
+            file_url: file_url.clone().unwrap(),
+            file_ext,
+            file_md5: md5.clone(),
+            rating: p.get("rating").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            fav_count: p.get("fav_count").and_then(|x| x.as_i64()),
+            score_total: p.get("score").and_then(|s| s.get("total")).and_then(|x| x.as_i64()),
+            created_at: p.get("created_at").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            sources,
+            tags: E621Tags {
+              general: vec_from("general"),
+              species: vec_from("species"),
+              character: vec_from("character"),
+              artist: vec_from("artist"),
+              meta: vec_from("meta"),
+              lore: vec_from("lore"),
+              copyright: vec_from("copyright"),
+            },
+          };
+
+          {
+            let mut st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+            st.status.new_attempted += 1;
+          }
+
+          match add_e621_post(app2.clone(), post_input) {
+            Ok(_) => {
+              let mut st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+              st.status.downloaded_ok += 1;
+            }
+            Err(err) => {
+              // keep the sources in unavailable so the user can follow them
+              upsert_unavailable(&conn, "e621", &post_id.to_string(), "download_failed", file_url.is_some().then(|| vec![]).unwrap_or_default())?;
+              let mut st = state2.lock().map_err(|_| "Sync state lock poisoned")?;
+              st.status.failed_downloads += 1;
+              st.status.last_error = Some(err);
+            }
+          }
+        }
+
+        page += 1;
+      }
+
+      Ok(())
+    })();
+
+    // mark finished
+    let mut st = state2.lock().ok();
+    if let Some(ref mut st) = st {
+      st.status.running = false;
+      if let Err(e) = result {
+        st.status.last_error = Some(e);
+      }
+    }
+  });
+
+  Ok(Status { ok: true, message: "Sync started".into() })
+}
+
+#[tauri::command]
+pub fn e621_favorite(app: AppHandle, post_id: i64) -> Result<Status, String> {
+  let root = get_root(&app)?;
+  let conn = open_conn_for_root(&root)?;
+  let (username, api_key) = load_e621_creds(&conn)?;
+
+  let client = reqwest::blocking::Client::new();
+  let resp = client
+    .post("https://e621.net/favorites.json")
+    .basic_auth(username, Some(api_key))
+    .header("User-Agent", "Guacamole Viewer/0.1.0 (favorite)")
+    .header("Content-Type", "application/x-www-form-urlencoded")
+    .body(format!("post_id={}", post_id))
+    .send()
+    .map_err(|e| e.to_string())?;
+
+  // 422 = already favorited, acceptable for "ensure"
+  if !resp.status().is_success() && resp.status().as_u16() != 422 {
+    return Err(format!("Favorite failed: HTTP {}", resp.status()));
+  }
+
+  Ok(Status { ok: true, message: "Favorited on e621".into() })
 }
 
 #[tauri::command]
@@ -250,126 +858,6 @@ fn upsert_source(conn: &Connection, url: &str) -> Result<i64, String> {
   Ok(id)
 }
 
-#[tauri::command]
-pub fn import_json(app: AppHandle, json_path: String, rename_files: bool) -> Result<ImportResult, String> {
-  let root = get_root(&app)?;
-  library::ensure_layout(&root)?;
-
-  let text = fs::read_to_string(&json_path).map_err(|e| e.to_string())?;
-  let parsed: JsonDb = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-
-  let conn = db::open(&library::db_path(&root))?;
-  db::init_schema(&conn)?;
-
-  let mut result = ImportResult { imported: 0, skipped: 0, missing_files: 0, errors: vec![] };
-
-  for it in parsed.items {
-    let source = it.source.unwrap_or_else(|| "unknown".into());
-    let source_id = it.id.to_string().trim_matches('"').to_string();
-
-    let local_path = match it.local_path {
-      Some(p) => p,
-      None => { result.errors.push(format!("Missing local_path for {source}:{source_id}")); continue; }
-    };
-    let src = PathBuf::from(&local_path);
-    if !src.exists() {
-      result.missing_files += 1;
-      continue;
-    }
-
-    // Skip if already in DB by (source, source_id)
-    let exists: i64 = conn.query_row(
-      "SELECT COUNT(*) FROM items WHERE source=? AND source_id=?",
-      params![source, source_id],
-      |r: &Row| r.get(0)
-    ).map_err(|e| e.to_string())?;
-    if exists > 0 {
-      result.skipped += 1;
-      continue;
-    }
-
-    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
-
-    let artists = it.artist.unwrap_or_default();
-    let primary_artist = sanitize_slug(&pick_primary_artist(&artists));
-
-    let base_name = if rename_files {
-      format!("{primary_artist}_{source}_{source_id}.{}", ext)
-    } else {
-      src.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string()
-    };
-
-    // Ensure unique destination filename
-    let mut filename = base_name.clone();
-    let mut n = 1;
-    let media_dir = root.join("media");
-    let mut dest = media_dir.join(&filename);
-    while dest.exists() {
-      filename = if rename_files {
-        format!("{primary_artist}_{source}_{source_id}_dup{n}.{}", ext)
-      } else {
-        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-        format!("{stem}_dup{n}.{}", ext)
-      };
-      dest = media_dir.join(&filename);
-      n += 1;
-    }
-
-    // Copy into library root (reorganize)
-    fs::copy(&src, &dest).map_err(|e| e.to_string())?;
-
-    let file_rel = format!("media/{}", filename.replace('\\', "/"));
-    let added_at = Utc::now().to_rfc3339();
-
-    conn.execute(
-      r#"
-      INSERT INTO items(source, source_id, remote_url, file_rel, ext, rating, created_at, added_at, primary_artist)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-      "#,
-      params![
-        source, source_id, it.url, file_rel, ext,
-        it.rating, it.timestamp, added_at, primary_artist
-      ]
-    ).map_err(|e| e.to_string())?;
-
-    let item_id = conn.last_insert_rowid();
-
-    // tags (JSON tags = general)
-    if let Some(tags) = it.tags {
-      for tag in tags {
-        let tag_id = upsert_tag(&conn, &tag, "general")?;
-        conn.execute(
-          "INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?, ?)",
-          params![item_id, tag_id]
-        ).map_err(|e| e.to_string())?;
-      }
-    }
-
-    // artists as typed tags
-    for a in &artists {
-      let tag_id = upsert_tag(&conn, a, "artist")?;
-      conn.execute(
-        "INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES(?, ?)",
-        params![item_id, tag_id]
-      ).map_err(|e| e.to_string())?;
-    }
-
-    // sources URLs if present
-    if let Some(srcs) = it.sources {
-      for u in srcs {
-        let sid = upsert_source(&conn, &u)?;
-        conn.execute(
-          "INSERT OR IGNORE INTO item_sources(item_id, source_row_id) VALUES(?, ?)",
-          params![item_id, sid]
-        ).map_err(|e| e.to_string())?;
-      }
-    }
-
-    result.imported += 1;
-  }
-
-  Ok(result)
-}
 
 #[tauri::command]
 pub fn trash_item(app: AppHandle, item_id: i64) -> Result<Status, String> {

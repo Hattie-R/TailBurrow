@@ -3,15 +3,9 @@ import { Search, Upload, Play, Pause, ChevronLeft, ChevronRight, X, Tag, Trash2,
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import Masonry from "react-masonry-css";
+import { Database, Loader2  } from "lucide-react";
 
 type AppConfig = { library_root?: string | null };
-
-type ImportResult = {
-  imported: number;
-  skipped: number;
-  missing_files: number;
-  errors: string[];
-};
 
 type ItemDto = {
   item_id: number;
@@ -47,8 +41,31 @@ type LibraryItem = {
   timestamp?: string | null;
 };
 
+type SyncStatus = {
+  running: boolean;
+  cancelled: boolean;
+  max_new_downloads?: number | null;
+  scanned_pages: number;
+  scanned_posts: number;
+  skipped_existing: number;
+  new_attempted: number;
+  downloaded_ok: number;
+  failed_downloads: number;
+  unavailable: number;
+  last_error?: string | null;
+};
+
+type UnavailableDto = {
+  source: string;
+  source_id: string;
+  seen_at: string;
+  reason: string;
+  sources: string[];
+};
+
 type Feed = { id: number; name: string; query: string };
 type FeedPagingState = { beforeId: number | null; done: boolean };
+type E621CredInfo = { username?: string | null; has_api_key: boolean };
 
 export default function FavoritesViewer() {
   const [activeTab, setActiveTab] = useState('viewer');
@@ -64,7 +81,6 @@ export default function FavoritesViewer() {
   const [fadeIn, setFadeIn] = useState(true);
   const [imageLoading, setImageLoading] = useState(true);
   const [imageCache, setImageCache] = useState<Record<string, boolean>>({});
-  const [renameOnImport, setRenameOnImport] = useState(false);
   
   // Feed state
   const [feeds, setFeeds] = useState<Feed[]>([]);
@@ -79,11 +95,135 @@ export default function FavoritesViewer() {
   const [showSettings, setShowSettings] = useState(false);
   const [libraryRoot, setLibraryRoot] = useState("");
   const [feedPaging, setFeedPaging] = useState<Record<number, FeedPagingState>>({}); 
+  const [downloadedE621Ids, setDownloadedE621Ids] = useState<Set<number>>(new Set());
+  const [feedActionBusy, setFeedActionBusy] = useState<Record<number, boolean>>({});
+  const [syncMaxNew, setSyncMaxNew] = useState<string>(""); // blank = unlimited
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [showUnavailable, setShowUnavailable] = useState(false);
+  const [unavailableList, setUnavailableList] = useState<UnavailableDto[]>([]);
+  const syncWasRunningRef = useRef(false);
   const feedBreakpoints = {
     default: 3,
     1024: 3,
     768: 2,
     520: 1,
+  };
+
+  const refreshSyncStatus = async () => {
+    const st = await invoke<SyncStatus>("e621_sync_status");
+    setSyncStatus(st);
+  };
+
+  const startSync = async () => {
+    const n = syncMaxNew.trim() === "" ? null : Number(syncMaxNew);
+    if (syncMaxNew.trim() !== "" && (!Number.isFinite(n) || n! <= 0)) {
+      alert("Stop-after-N must be a positive number or blank.");
+      return;
+    }
+    
+    await invoke("e621_sync_start", { maxNewDownloads: n });
+    syncWasRunningRef.current = true;
+    await refreshSyncStatus();
+  };
+
+  const cancelSync = async () => {
+    await invoke("e621_sync_cancel");
+    await refreshSyncStatus();
+  };
+
+  const loadUnavailable = async () => {
+    const list = await invoke<UnavailableDto[]>("e621_unavailable_list", { limit: 200 });
+    setUnavailableList(list);
+    setShowUnavailable(true);
+  };
+
+  const [e621CredInfo, setE621CredInfo] = useState<E621CredInfo>({
+    username: null,
+    has_api_key: false,
+  });
+
+  const [credWarned, setCredWarned] = useState(false);
+
+  const refreshE621CredInfo = async () => {
+    const info = await invoke<E621CredInfo>("e621_get_cred_info");
+    setE621CredInfo(info);
+    // prefill username, but NEVER prefill the key
+    if (info.username) setApiUsername(info.username);
+  };
+
+  const saveE621Credentials = async () => {
+    await invoke("e621_set_credentials", {
+      username: apiUsername,
+      apiKey: apiKey, // can be blank -> backend keeps existing key
+    });
+    setApiKey(""); // clear for safety
+    await refreshE621CredInfo();
+    alert("Saved e621 credentials.");
+  };
+
+  const testE621Credentials = async () => {
+    const res = await invoke<{ ok: boolean; message: string }>("e621_test_connection");
+    alert(res.message);
+  };
+
+  const favoriteOnE621 = async (postId: number) => {
+    await invoke("e621_favorite", { postId });
+  };
+
+  const ensureFavorite = async (feedId: number, post: any) => {
+    const id = post.id as number;
+
+    try {
+      setFeedActionBusy((prev) => ({ ...prev, [id]: true }));
+
+      // 1) download into library if missing
+      if (!downloadedE621Ids.has(id)) {
+        if (!post?.file?.url) {
+          throw new Error("This post has no original file URL (deleted/blocked).");
+        }
+
+        await invoke("add_e621_post", {
+          post: {
+            id: post.id,
+            file_url: post.file.url,
+            file_ext: post.file.ext,
+            file_md5: post.file.md5,
+            rating: post.rating,
+            fav_count: post.fav_count,
+            score_total: post.score?.total,
+            created_at: post.created_at,
+            sources: post.sources || [],
+            tags: {
+              general: post.tags?.general || [],
+              species: post.tags?.species || [],
+              character: post.tags?.character || [],
+              artist: post.tags?.artist || [],
+              meta: post.tags?.meta || [],
+              lore: post.tags?.lore || [],
+              copyright: post.tags?.copyright || [],
+            },
+          },
+        });
+
+        await loadData(); // updates downloadedE621Ids + DB badge
+      }
+
+      // 2) ensure remote favorite
+      await favoriteOnE621(id);
+
+      // 3) update UI star immediately
+      setFeedPosts((prev) => ({
+        ...prev,
+        [feedId]: (prev[feedId] || []).map((p: any) =>
+          p.id === id ? { ...p, is_favorited: true } : p
+        ),
+      }));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(msg);
+    } finally {
+      setFeedActionBusy((prev) => ({ ...prev, [id]: false }));
+    }
   };
 
   function InfiniteSentinel({
@@ -115,25 +255,6 @@ export default function FavoritesViewer() {
   }
 
   // new functions
-  const importJsonDb = async () => {
-  const file = await open({
-    multiple: false,
-    directory: false,
-    filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (!file || Array.isArray(file)) return;
-
-  const res = await invoke<ImportResult>("import_json", {
-    jsonPath: file,
-    renameFiles: renameOnImport,
-  });
-
-    alert(
-      `Imported: ${res.imported}\nSkipped: ${res.skipped}\nMissing files: ${res.missing_files}`
-    );
-
-    await loadData();
-  };
 
     const refreshLibraryRoot = async () => {
     const cfg = await invoke<AppConfig>("get_config");
@@ -149,12 +270,43 @@ export default function FavoritesViewer() {
     await loadData(); // reload items from the new DB/root
   };
 
+useEffect(() => {
+  if (!showSettings) return;
+
+  let t: ReturnType<typeof setInterval> | undefined;
+
+  const tick = async () => {
+    try {
+      const st = await invoke<SyncStatus>("e621_sync_status");
+      setSyncStatus(st);
+
+      // Detect: running -> finished
+      if (syncWasRunningRef.current && !st.running) {
+        // Sync just finished, refresh library view
+        await loadData();
+      }
+
+      syncWasRunningRef.current = st.running;
+    } catch {
+      // ignore
+    }
+  };
+
+  tick();
+  
+  t = setInterval(tick, 1000);
+
+  return () => {
+    if (t) clearInterval(t);
+  };
+}, [showSettings]);
+
 
   useEffect(() => {
     loadData().catch(console.error);
     refreshLibraryRoot().catch(console.error);
     loadFeeds();
-    loadApiCredentials();
+    refreshE621CredInfo().catch(console.error);
   }, []);
 
   useEffect(() => {
@@ -199,19 +351,6 @@ export default function FavoritesViewer() {
       });
     }
   }, [currentIndex, filteredItems]);
-
-  const loadApiCredentials = () => {
-    const username = localStorage.getItem('e621_username');
-    const key = localStorage.getItem('e621_api_key');
-    if (username) setApiUsername(username);
-    if (key) setApiKey(key);
-  };
-
-  const saveApiCredentials = () => {
-    localStorage.setItem('e621_username', apiUsername);
-    localStorage.setItem('e621_api_key', apiKey);
-    alert('API credentials saved!');
-  };
 
   const goToNext = () => {
     setFadeIn(false);
@@ -268,6 +407,12 @@ export default function FavoritesViewer() {
 
     setItems(mapped);
 
+    const downloaded = new Set<number>();
+    for (const it of mapped) {
+      if (it.source === "e621") downloaded.add(Number(it.source_id));
+    }
+    setDownloadedE621Ids(downloaded);
+
     // Build tag list (same logic you already had)
     const tags = new Set<string>();
     mapped.forEach((item) => item.tags?.forEach((tag) => tags.add(tag)));
@@ -320,11 +465,13 @@ export default function FavoritesViewer() {
   };
 
   const fetchFeedPosts = async (feedId: number, query: string, { reset = false }: { reset?: boolean } = {}) => {
-    if (!apiUsername || !apiKey) {
-      alert('Please set your e621 API credentials in the settings below');
-      return;
+    if (!e621CredInfo.username || !e621CredInfo.has_api_key) {
+    if (!credWarned) {
+      alert("Set e621 credentials in Settings first.");
+      setCredWarned(true);
     }
-
+    return;
+  }
     // prevent double loads
     if (loadingFeeds[feedId]) return;
 
@@ -337,27 +484,16 @@ export default function FavoritesViewer() {
     setLoadingFeeds(prev => ({ ...prev, [feedId]: true }));
 
     try {
-      const auth = btoa(`${apiUsername}:${apiKey}`);
-
       const LIMIT = 50;
-
-      // e621 supports page=b<ID> to fetch posts before that id (good for infinite scroll)
       const beforeId = reset ? null : paging.beforeId;
       const pageParam = beforeId ? `b${beforeId}` : "1";
 
-      const response = await fetch(
-        `https://e621.net/posts.json?tags=${encodeURIComponent(query)}&limit=${LIMIT}&page=${encodeURIComponent(pageParam)}`,
-        {
-          headers: {
-            'User-Agent': 'LocalFavoritesLibrary/0.1 (by you)',
-            'Authorization': `Basic ${auth}`
-          }
-        }
-      );
+      const data = await invoke<any>("e621_fetch_posts", {
+        tags: query,
+        limit: LIMIT,
+        page: pageParam,
+      });
 
-      if (!response.ok) throw new Error(`API error: ${response.status}`);
-
-      const data = await response.json();
       const newPosts = data.posts || [];
 
       // append + dedupe by id
@@ -377,15 +513,15 @@ export default function FavoritesViewer() {
         return { ...prev, [feedId]: deduped };
       });
 
-      // update cursor: next request should fetch older than the smallest id we have
+      // update cursor
       const minId = newPosts.reduce((m: number, p: any) => Math.min(m, p.id), Number.POSITIVE_INFINITY);
 
       setFeedPaging(prev => ({
         ...prev,
         [feedId]: {
           beforeId: (minId !== Number.POSITIVE_INFINITY) ? minId : paging.beforeId,
-          done: newPosts.length < LIMIT || newPosts.length === 0
-        }
+          done: newPosts.length < LIMIT || newPosts.length === 0,
+        },
       }));
     } catch (error) {
       console.error('Error fetching feed:', error);
@@ -396,13 +532,6 @@ export default function FavoritesViewer() {
     }
   };
 
-  const isFavorited = (url: string) => {
-    return items.some((item) => item.remote_url === url);
-  };
-
-  const toggleFavorite = (_post: any) => {
-    alert("Download-to-library from Feeds is not implemented yet.");
-  };
 
   const filterItems = () => {
     let filtered = items;
@@ -558,6 +687,149 @@ export default function FavoritesViewer() {
                   Changing library folder will switch to the database/media inside that folder.
                 </p>
               </div>
+              <div className="border-t border-gray-700 pt-4 mt-4">
+                <h3 className="text-lg font-semibold mb-2">e621</h3>
+
+                <div className="text-xs text-gray-400 mb-2">
+                  Used for Feeds, Favoriting, and Sync.
+                </div>
+
+                <div className="flex gap-2 mb-2">
+                  <input
+                    type="text"
+                    placeholder="Username"
+                    value={apiUsername}
+                    onChange={(e) => setApiUsername(e.target.value)}
+                    className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
+                  />
+                  <input
+                    type="password"
+                    placeholder={e621CredInfo.has_api_key ? "API Key (saved) — leave blank to keep" : "API Key"}
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+
+                <div className="flex gap-2 items-center">
+                  <button
+                    onClick={saveE621Credentials}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded"
+                  >
+                    Save
+                  </button>
+
+                  <button
+                    onClick={testE621Credentials}
+                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
+                  >
+                    Test connection
+                  </button>
+
+                  <div className="text-xs text-gray-400">
+                    Key: {e621CredInfo.has_api_key ? "saved" : "not set"}
+                  </div>
+                </div>
+
+                <p className="text-xs text-gray-500 mt-2">
+                  Get your API key from e621.net account settings. The app stores it locally.
+                </p>
+              </div>
+              <div className="border-t border-gray-700 pt-4 mt-4">
+                <h3 className="text-lg font-semibold mb-2">Sync Favorites</h3>
+
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="text"
+                    placeholder="Stop after N new downloads (blank = unlimited)"
+                    value={syncMaxNew}
+                    onChange={(e) => setSyncMaxNew(e.target.value)}
+                    className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
+                  />
+
+                  <button
+                    onClick={startSync}
+                    disabled={!!syncStatus?.running}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50"
+                  >
+                    {syncStatus?.running ? "Running..." : "Start"}
+                  </button>
+
+                  <button
+                    onClick={cancelSync}
+                    disabled={!syncStatus?.running}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                {syncStatus && (
+                  <div className="mt-3 text-sm text-gray-300 space-y-1">
+                    <div>Pages scanned: {syncStatus.scanned_pages}</div>
+                    <div>Posts scanned: {syncStatus.scanned_posts}</div>
+                    <div>Skipped (already in DB): {syncStatus.skipped_existing}</div>
+                    <div>New attempted: {syncStatus.new_attempted}</div>
+                    <div>Downloaded OK: {syncStatus.downloaded_ok}</div>
+                    <div>Failed downloads: {syncStatus.failed_downloads}</div>
+                    <div>Unavailable (no file URL): {syncStatus.unavailable}</div>
+
+                    {syncStatus.last_error && (
+                      <div className="text-red-300 break-words">Last error: {syncStatus.last_error}</div>
+                    )}
+
+                    <button
+                      onClick={loadUnavailable}
+                      className="mt-2 px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                    >
+                      View unavailable list
+                    </button>
+                  </div>
+                )}
+              </div>
+              {showUnavailable && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center">
+                  <div className="absolute inset-0 bg-black/60" onClick={() => setShowUnavailable(false)} />
+                  <div className="relative z-10 w-full max-w-3xl bg-gray-800 border border-gray-700 rounded-lg p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-lg font-semibold">Unavailable favorites</h2>
+                      <button onClick={() => setShowUnavailable(false)} className="text-gray-400 hover:text-gray-200">
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <div className="max-h-[60vh] overflow-y-auto space-y-3">
+                      {unavailableList.length === 0 ? (
+                        <div className="text-gray-400">No unavailable posts recorded.</div>
+                      ) : (
+                        unavailableList.map((u) => (
+                          <div key={`${u.source}:${u.source_id}`} className="bg-gray-900 border border-gray-700 rounded p-3">
+                            <div className="text-sm text-gray-200">
+                              <span className="text-gray-400">{u.source}</span> #{u.source_id}
+                              <span className="text-gray-500"> • {u.reason}</span>
+                              <span className="text-gray-500"> • {u.seen_at}</span>
+                            </div>
+
+                            <div className="mt-2 text-xs text-gray-300 space-y-1">
+                              {u.sources.length > 0 ? (
+                                u.sources.map((s, i) => (
+                                  <div key={i}>
+                                    <a className="text-purple-400 underline break-all" href={s} target="_blank" rel="noreferrer">
+                                      {s}
+                                    </a>
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="text-gray-500">No source links available.</div>
+                              )}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -569,19 +841,6 @@ export default function FavoritesViewer() {
           <div className="border-b border-gray-700 p-4">
             <div className="max-w-7xl mx-auto">
               <div className="flex gap-4 items-center flex-wrap">
-                <button
-                  onClick={importJsonDb}
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded">
-                  <Upload className="inline w-4 h-4 mr-2" />
-                  Import JSON
-                </button>
-              <label className="text-sm text-gray-300 flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={renameOnImport}
-                  onChange={(e) => setRenameOnImport(e.target.checked)}/>
-                Rename files during import
-              </label>
                 <div className="flex-1 min-w-[200px] relative">
                   <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
                   <input
@@ -814,8 +1073,8 @@ export default function FavoritesViewer() {
           ) : (
             <div className="text-center py-20 text-gray-400">
               <Upload className="w-16 h-16 mx-auto mb-4 opacity-50" />
-              <p className="text-xl">Import your favorites_db.json to get started</p>
-              <p className="text-sm mt-2">Run the Python scraper first to generate the data file</p>
+              <p className="text-xl">No items yet</p>
+              <p className="text-sm mt-2">Open Settings → e621 → Sync Favorites to download your library</p>
             </div>
           )}
         </>
@@ -824,34 +1083,6 @@ export default function FavoritesViewer() {
       {/* Feeds Tab */}
       {activeTab === 'feeds' && (
         <div className="max-w-7xl mx-auto p-4">
-          {/* API Credentials */}
-          <div className="bg-gray-800 rounded-lg p-4 mb-6">
-            <h3 className="text-lg font-semibold mb-3">e621 API Credentials</h3>
-            <div className="flex gap-2 mb-2">
-              <input
-                type="text"
-                placeholder="Username"
-                value={apiUsername}
-                onChange={(e) => setApiUsername(e.target.value)}
-                className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
-              />
-              <input
-                type="password"
-                placeholder="API Key"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
-              />
-              <button
-                onClick={saveApiCredentials}
-                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded"
-              >
-                Save
-              </button>
-            </div>
-            <p className="text-xs text-gray-500">Get your API key from e621.net account settings</p>
-          </div>
-
           {/* Add Feed */}
           <div className="bg-gray-800 rounded-lg p-4 mb-6">
             <h3 className="text-lg font-semibold mb-3">Add New Feed</h3>
@@ -913,8 +1144,9 @@ export default function FavoritesViewer() {
                   columnClassName="flex flex-col gap-3"
                 >
                   {feedPosts[feed.id].map((post) => {
+                    const busy = !!feedActionBusy[post.id];
+                    const isRemoteFav = !!post.is_favorited;
                     const imageUrl = post.sample?.url || post.file?.url || post.preview?.url;
-                    const fileUrl = post.file?.url || imageUrl;
                     const sourceUrl = `https://e621.net/posts/${post.id}`;
                     const artists = post.tags?.artist || [];
 
@@ -927,6 +1159,11 @@ export default function FavoritesViewer() {
                         key={post.id}
                         className="relative group bg-gray-700 rounded overflow-hidden"
                       >
+                        {downloadedE621Ids.has(post.id) && (
+                          <div className="absolute top-2 left-2 z-20 bg-gray-900/70 text-gray-200 px-2 py-1 rounded flex items-center gap-1">
+                            <Database className="w-4 h-4" />
+                          </div>
+                        )}
                         {imageUrl ? (
                           <>
                             <img
@@ -938,14 +1175,19 @@ export default function FavoritesViewer() {
                               referrerPolicy="no-referrer"
                             />
                             <button
-                              onClick={() => toggleFavorite(post)}
+                              onClick={() => ensureFavorite(feed.id, post)}
+                              disabled={busy}
                               className={`absolute top-2 right-2 p-2 rounded-full transition z-20 ${
-                                isFavorited(fileUrl)
+                                isRemoteFav
                                   ? "bg-yellow-500 text-yellow-900"
                                   : "bg-gray-900/70 text-gray-300 hover:bg-gray-900/90"
-                              }`}
+                              } ${busy ? "opacity-60 cursor-not-allowed" : ""}`}
                             >
-                              <Star className={`w-5 h-5 ${isFavorited(fileUrl) ? "fill-current" : ""}`} />
+                              {busy ? (
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                              ) : (
+                                <Star className={`w-5 h-5 ${isRemoteFav ? "fill-current" : ""}`} />
+                              )}
                             </button>
 
                             <div
@@ -981,7 +1223,12 @@ export default function FavoritesViewer() {
                 </Masonry>
               )}
               <InfiniteSentinel
-                disabled={!!loadingFeeds[feed.id] || !!feedPaging[feed.id]?.done}
+                disabled={
+                  !e621CredInfo.username ||
+                  !e621CredInfo.has_api_key ||
+                  !!loadingFeeds[feed.id] ||
+                  !!feedPaging[feed.id]?.done
+                }
                 onVisible={() => fetchFeedPosts(feed.id, feed.query)}
               />
 
