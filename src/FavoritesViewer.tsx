@@ -1,9 +1,17 @@
 import { useState, useEffect, useRef } from "react";
-import { Search, Upload, Play, Pause, ChevronLeft, ChevronRight, X, Tag, Trash2, Rss, Plus, Star, Maximize, Settings } from 'lucide-react';
+import {
+  Search, Upload, Play, Pause, ChevronLeft, ChevronRight,
+  X, Tag, Trash2, Rss, Plus, Star, Maximize, Settings,
+  Database, Loader2
+} from "lucide-react";
+
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import Masonry from "react-masonry-css";
-import { Database, Loader2  } from "lucide-react";
+
+/* =========================
+   Types
+========================= */
 
 type AppConfig = { library_root?: string | null };
 
@@ -102,11 +110,29 @@ export default function FavoritesViewer() {
   const [showUnavailable, setShowUnavailable] = useState(false);
   const [unavailableList, setUnavailableList] = useState<UnavailableDto[]>([]);
   const syncWasRunningRef = useRef(false);
+  const [viewerOverlay, setViewerOverlay] = useState(false); // full-window viewer inside app
+  const [showHud, setShowHud] = useState(true);
+  const hudHoverRef = useRef(false);
+  const hudTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const HUD_TIMEOUT_MS = 2000; // 3–5 seconds; adjust
   const feedBreakpoints = {
     default: 3,
     1024: 3,
     768: 2,
     520: 1,
+  };
+
+  const scheduleHudHide = () => {
+    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+
+    hudTimerRef.current = setTimeout(() => {
+      if (!hudHoverRef.current) setShowHud(false);
+    }, HUD_TIMEOUT_MS);
+  };
+
+  const pokeHud = () => {
+    setShowHud(true);
+    scheduleHudHide();
   };
 
   const refreshSyncStatus = async () => {
@@ -270,37 +296,62 @@ export default function FavoritesViewer() {
     await loadData(); // reload items from the new DB/root
   };
 
-useEffect(() => {
-  if (!showSettings) return;
+  useEffect(() => {
+    if (!showSettings) return;
 
-  let t: ReturnType<typeof setInterval> | undefined;
+    let t: ReturnType<typeof setInterval> | undefined;
 
-  const tick = async () => {
-    try {
-      const st = await invoke<SyncStatus>("e621_sync_status");
-      setSyncStatus(st);
+    const tick = async () => {
+      try {
+        const st = await invoke<SyncStatus>("e621_sync_status");
+        setSyncStatus(st);
 
-      // Detect: running -> finished
-      if (syncWasRunningRef.current && !st.running) {
-        // Sync just finished, refresh library view
-        await loadData();
+        // Detect: running -> finished
+        if (syncWasRunningRef.current && !st.running) {
+          // Sync just finished, refresh library view
+          await loadData();
+        }
+
+        syncWasRunningRef.current = st.running;
+      } catch {
+        // ignore
       }
+    };
 
-      syncWasRunningRef.current = st.running;
-    } catch {
-      // ignore
-    }
-  };
+    tick();
+    
+    t = setInterval(tick, 1000);
 
-  tick();
-  
-  t = setInterval(tick, 1000);
+    return () => {
+      if (t) clearInterval(t);
+    };
+  }, [showSettings]);
 
-  return () => {
-    if (t) clearInterval(t);
-  };
-}, [showSettings]);
+  useEffect(() => {
+    if (!viewerOverlay) return;
 
+    const onKeyDown = (e: KeyboardEvent) => {
+      pokeHud();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setViewerOverlay(false);
+        //toggleFullscreen();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [viewerOverlay]);
+
+  useEffect(() => {
+    return () => {
+      if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (viewerOverlay) pokeHud();
+  }, [viewerOverlay]);
 
   useEffect(() => {
     loadData().catch(console.error);
@@ -352,7 +403,8 @@ useEffect(() => {
     }
   }, [currentIndex, filteredItems]);
 
-  const goToNext = () => {
+  const goToNext = (manual = false) => {
+    if (viewerOverlay && manual) pokeHud();
     setFadeIn(false);
     setTimeout(() => {
       setCurrentIndex((prev) => (prev + 1) % filteredItems.length);
@@ -360,7 +412,8 @@ useEffect(() => {
     }, 150);
   };
 
-  const goToPrev = () => {
+  const goToPrev = (manual = false) => {
+    if (viewerOverlay && manual) pokeHud();
     setFadeIn(false);
     setTimeout(() => {
       setCurrentIndex((prev) => (prev - 1 + filteredItems.length) % filteredItems.length);
@@ -369,13 +422,14 @@ useEffect(() => {
   };
 
   const toggleFullscreen = () => {
+    if (viewerOverlay) pokeHud();
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen();
     } else {
       document.exitFullscreen();
     }
   };
-
+  
   useEffect(() => {
     const handleFullscreenChange = () => {
       //setIsFullscreen(!!document.fullscreenElement);
@@ -591,9 +645,6 @@ useEffect(() => {
   const deleteCurrentItem = async () => {
     const itemToDelete = filteredItems[currentIndex];
     if (!itemToDelete) return;
-
-    const confirmed = window.confirm("Move this item to trash?");
-    if (!confirmed) return;
 
     await invoke("trash_item", { itemId: itemToDelete.item_id });
     await loadData();
@@ -890,109 +941,176 @@ useEffect(() => {
             <div className="max-w-7xl mx-auto p-4">
               <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
                 <div className="lg:col-span-3">
-                  <div className="bg-gray-800 rounded-lg overflow-hidden">
+                  <div
+                    className={
+                      viewerOverlay
+                        ? "fixed inset-0 z-50 bg-black"
+                        : "bg-gray-800 rounded-lg overflow-hidden"
+                    }
+                    onMouseMove={() => viewerOverlay && pokeHud()}
+                    onMouseDown={() => viewerOverlay && pokeHud()}
+                    onWheel={() => viewerOverlay && pokeHud()}
+                    onTouchStart={() => viewerOverlay && pokeHud()}
+                  >
                     {currentItem && (
-                      <div className="relative bg-black">
+                      <div className={viewerOverlay ? "relative w-full h-full" : "relative bg-black"}>
                         {imageLoading && (
-                          <div className="absolute inset-0 flex items-center justify-center">
+                          <div className="absolute inset-0 flex items-center justify-center z-10">
                             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500"></div>
                           </div>
                         )}
-                        {isVideo ? (
-                          <video
-                            key={currentItem.url}
-                            src={currentItem.url}
-                            controls
-                            autoPlay
-                            loop
-                            className={`w-full h-auto max-h-[70vh] object-contain transition-opacity duration-300 ${
-                              fadeIn ? 'opacity-100' : 'opacity-0'
-                            }`}
-                            onLoadedData={(e) => {
-                              (e.currentTarget as HTMLVideoElement).volume = 1.0;
-                              setImageLoading(false);
-                            }}
-                            onLoadStart={() => setImageLoading(true)}
-                            onError={(e) => {
-                              const img = e.currentTarget; // HTMLImageElement
-                              img.src =
-                                "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Crect fill='%23374151' width='400' height='300'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' fill='%239CA3AF' font-size='20'%3EImage not found%3C/text%3E%3C/svg%3E";
-                              setImageLoading(false);
-                            }}
-                          />
-                        ) : (
-                          <img
-                            src={currentItem.url}
-                            alt="Favorite"
-                            className={`w-full h-auto max-h-[70vh] object-contain transition-opacity duration-300 ${
-                              fadeIn ? 'opacity-100' : 'opacity-0'
-                            }`}
-                            onLoad={() => setImageLoading(false)}
-                            onLoadStart={() => setImageLoading(true)}
-                            onError={(e) => {
-                              setImageLoading(false);
-                              const img = e.currentTarget as HTMLImageElement;
-                              img.src = "data:image/svg+xml,...";
-                            }}
-                          />
+                        {viewerOverlay && (
+                          <>
+                            {/* Left click zone → previous */}
+                            <div
+                              className="absolute inset-y-0 left-0 w-1/2 z-0 cursor-pointer"
+                              onClick={() => goToPrev(true)}
+                            />
+
+                            {/* Right click zone → next */}
+                            <div
+                              className="absolute inset-y-0 right-0 w-1/2 z-0 cursor-pointer"
+                              onClick={() => goToNext(true)}
+                            />
+                          </>
                         )}
-                      </div>
-                    )}
-                    <div className="p-4 bg-gray-800 border-t border-gray-700">
-                      <div className="flex items-center justify-between mb-4">
-                        <button
-                          onClick={goToPrev}
-                          className="p-2 bg-gray-700 hover:bg-gray-600 rounded"
-                        >
-                          <ChevronLeft className="w-5 h-5" />
-                        </button>
 
-                        <div className="flex gap-2 items-center">
-                          <button
-                            onClick={() => setIsSlideshow(!isSlideshow)}
-                            className="p-2 bg-purple-600 hover:bg-purple-700 rounded"
-                          >
-                            {isSlideshow ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
-                          </button>
-
-                          <select
-                            value={slideshowSpeed}
-                            onChange={(e) => setSlideshowSpeed(Number(e.target.value))}
-                            className="px-3 py-2 bg-gray-700 border border-gray-600 rounded"
-                          >
-                            <option value={1000}>1s</option>
-                            <option value={3000}>3s</option>
-                            <option value={5000}>5s</option>
-                            <option value={10000}>10s</option>
-                          </select>
-
-                          <button
-                            onClick={toggleFullscreen}
-                            className="p-2 bg-gray-700 hover:bg-gray-600 rounded"
-                          >
-                            <Maximize className="w-5 h-5" />
-                          </button>
-
-                          <button
-                            onClick={deleteCurrentItem}
-                            className="p-2 bg-red-600 hover:bg-red-700 rounded"
-                          >
-                            <Trash2 className="w-5 h-5" />
-                          </button>
+                        {/* Media area */}
+                        <div className={viewerOverlay ? "w-full h-full flex items-center justify-center bg-black" : "bg-black"}>
+                          {isVideo ? (
+                            <video
+                              key={currentItem.url}
+                              src={currentItem.url}
+                              controls
+                              autoPlay
+                              loop
+                              className={
+                                viewerOverlay
+                                  ? `w-full h-full object-contain transition-opacity duration-300 ${fadeIn ? "opacity-100" : "opacity-0"}`
+                                  : `w-full h-auto max-h-[70vh] object-contain transition-opacity duration-300 ${fadeIn ? "opacity-100" : "opacity-0"}`
+                              }
+                              onLoadedData={(e) => {
+                                (e.currentTarget as HTMLVideoElement).volume = 1.0;
+                                setImageLoading(false);
+                              }}
+                              onLoadStart={() => setImageLoading(true)}
+                              onError={() => {
+                                setImageLoading(false);
+                                console.error("Video load error");
+                              }}
+                            />
+                          ) : (
+                            <img
+                              src={currentItem.url}
+                              alt="Favorite"
+                              className={
+                                viewerOverlay
+                                  ? `w-full h-full object-contain transition-opacity duration-300 ${fadeIn ? "opacity-100" : "opacity-0"}`
+                                  : `w-full h-auto max-h-[70vh] object-contain transition-opacity duration-300 ${fadeIn ? "opacity-100" : "opacity-0"}`
+                              }
+                              onLoad={() => setImageLoading(false)}
+                              onLoadStart={() => setImageLoading(true)}
+                              onError={(e) => {
+                                setImageLoading(false);
+                                const img = e.currentTarget as HTMLImageElement;
+                                img.src =
+                                  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Crect fill='%23374151' width='400' height='300'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' fill='%239CA3AF' font-size='20'%3EImage not found%3C/text%3E%3C/svg%3E";
+                              }}
+                            />
+                          )}
                         </div>
 
-                        <button
-                          onClick={goToNext}
-                          className="p-2 bg-gray-700 hover:bg-gray-600 rounded"
+                        {/* Controls  */}
+                        <div
+                          className={
+                            viewerOverlay
+                              ? [
+                                  "absolute bottom-6 left-1/2 -translate-x-1/2", //
+                                  "transition-all duration-300 ease-out",
+                                  showHud ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none",
+                                ].join(" ")
+                              : "p-4 bg-gray-800 border-t border-gray-700"
+                          }
+                          onMouseEnter={() => {
+                            if (!viewerOverlay) return;
+                            hudHoverRef.current = true;
+                            setShowHud(true);
+                          }}
+                          onMouseLeave={() => {
+                            if (!viewerOverlay) return;
+                            hudHoverRef.current = false;
+                            scheduleHudHide();
+                          }}
                         >
-                          <ChevronRight className="w-5 h-5" />
-                        </button>
-                      </div>
+                            <div
+                              className={
+                                viewerOverlay
+                                  ? "relative z-20 px-6 py-4 bg-gray-900/80 backdrop-blur-md rounded-2xl border border-gray-700/50 shadow-2xl"
+                                  : ""
+                              }
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="flex items-center justify-between mb-4">
+                                {!viewerOverlay && (
+                                  <button onClick={() => goToPrev(true)} className="p-2 bg-gray-700 hover:bg-gray-600 rounded">
+                                    <ChevronLeft className="w-5 h-5" />
+                                  </button>
+                                )}
 
-                      <div className="text-center text-gray-400 text-sm">
-                        {currentIndex + 1} / {filteredItems.length}
+                                <div className="flex gap-2 items-center">
+                                  <button
+                                    onClick={() => setIsSlideshow(!isSlideshow)}
+                                    className="p-2 bg-purple-600 hover:bg-purple-700 rounded"
+                                  >
+                                    {isSlideshow ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+                                  </button>
+
+                                  <select
+                                    value={slideshowSpeed}
+                                    onChange={(e) => setSlideshowSpeed(Number(e.target.value))}
+                                    className="px-3 py-2 bg-gray-700 border border-gray-600 rounded"
+                                  >
+                                    <option value={1000}>1s</option>
+                                    <option value={3000}>3s</option>
+                                    <option value={5000}>5s</option>
+                                    <option value={10000}>10s</option>
+                                  </select>
+
+                                  {/* This button now toggles overlay mode */}
+                                  <button
+                                    onClick={() => {setViewerOverlay((v) => !v);toggleFullscreen();}}
+                                    className="p-2 bg-gray-700 hover:bg-gray-600 rounded"
+                                    title={viewerOverlay ? "Exit full viewer" : "Full viewer"}
+                                  >
+                                    <Maximize className="w-5 h-5" />
+                                  </button>
+
+                                  {!viewerOverlay && (
+                                    <button 
+                                      onClick={deleteCurrentItem} 
+                                      className="p-2 bg-gray-700 hover:bg-red-600 rounded text-gray-400 hover:text-white transition-colors"
+                                      title="Move to trash"
+                                    >
+                                      <Trash2 className="w-5 h-5" />
+                                    </button>
+                                  )}
+                                </div>
+                                {!viewerOverlay && (
+                                  <button onClick={() => goToNext(true)} className="p-2 bg-gray-700 hover:bg-gray-600 rounded">
+                                    <ChevronRight className="w-5 h-5" />
+                                  </button>
+                                )}
+                              </div>
+
+                          {!viewerOverlay && (
+                            <div className="text-center text-gray-400 text-sm">
+                              {currentIndex + 1} / {filteredItems.length}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
+                    )}
                   </div>
 
                   {currentItem && (
