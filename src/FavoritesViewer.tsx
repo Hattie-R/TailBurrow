@@ -80,7 +80,7 @@ export default function FavoritesViewer() {
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [filteredItems, setFilteredItems] = useState<LibraryItem[]>([]);
   const [searchTags, setSearchTags] = useState('');
-  const [sortOrder, setSortOrder] = useState('default');
+  const [sortOrder, setSortOrder] = useState<'random' | 'default' | 'score' | 'newest' | 'oldest'>('random');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isSlideshow, setIsSlideshow] = useState(false);
   const [slideshowSpeed, setSlideshowSpeed] = useState(3000);
@@ -114,6 +114,7 @@ export default function FavoritesViewer() {
   const [showHud, setShowHud] = useState(true);
   const hudHoverRef = useRef(false);
   const hudTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasInitialShuffle = useRef(false);
   const HUD_TIMEOUT_MS = 2000; // 3–5 seconds; adjust
   const feedBreakpoints = {
     default: 3,
@@ -608,8 +609,9 @@ export default function FavoritesViewer() {
     }
 
     // Apply sorting
-    if (sortOrder === 'random') {
+    if ((sortOrder === 'random' || sortOrder === 'default') && !hasInitialShuffle.current) {
       filtered = [...filtered].sort(() => Math.random() - 0.5);
+      hasInitialShuffle.current = true;
     } else if (sortOrder === 'score') {
       filtered = [...filtered].sort((a, b) => {
         const scoreA = a.score?.total || 0;
@@ -905,7 +907,7 @@ export default function FavoritesViewer() {
 
                 <select
                   value={sortOrder}
-                  onChange={(e) => setSortOrder(e.target.value)}
+                  onChange={(e) => setSortOrder(e.target.value as typeof sortOrder)}
                   className="px-4 py-2 bg-gray-800 border border-gray-700 rounded focus:outline-none focus:border-purple-500"
                 >
                   <option value="default">Default Order</option>
