@@ -42,13 +42,8 @@ Developed with Tauri, React and Typescript in Vite. Just another *vibe-code* pro
     Log redaction + rotation; log location setting.
 
 ## Current Issues:
-1) Fullscreen behaviour
-    Fullscreen doesn't work with feeds
-2) Default order is not random
-3) Scrolling bar inconsistency
-4) Opening Settings I cannot scroll them, it scrolls main page instead
-5) Links are not opening in the default browser
-6) UX of Feed
+1) Fullscreen doesn't work with feeds
+2) UX of Feed
     Cannot preview videos
     Need a better solution for switching between feeds
-7) Need an option to clear credentials
+3) Need an option to clear credentials

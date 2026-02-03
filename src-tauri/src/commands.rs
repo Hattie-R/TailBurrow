@@ -732,8 +732,14 @@ pub fn e621_favorite(app: AppHandle, post_id: i64) -> Result<Status, String> {
 }
 
 #[tauri::command]
-pub fn list_items(app: AppHandle) -> Result<Vec<ItemDto>, String> {
-  let root = get_root(&app)?;
+pub fn list_items(
+    app: tauri::AppHandle,  // <-- ADD THIS
+    limit: Option<u32>, 
+    offset: Option<u32>
+) -> Result<Vec<ItemDto>, String> {
+  let limit = limit.unwrap_or(100);
+  let offset = offset.unwrap_or(0);
+  let root = get_root(&app)?;  // <-- Now 'app' exists
   let conn = db::open(&library::db_path(&root))?;
 
   let mut stmt = conn.prepare(
@@ -775,11 +781,12 @@ pub fn list_items(app: AppHandle) -> Result<Vec<ItemDto>, String> {
     FROM items i
     WHERE i.trashed_at IS NULL
     ORDER BY i.added_at DESC
+    LIMIT ? OFFSET ?
     "#
   ).map_err(|e| e.to_string())?;
 
   let rows = stmt
-    .query_map([], |r: &Row| {
+    .query_map([limit, offset], |r: &Row| {  // <-- PASS LIMIT AND OFFSET HERE
       let file_rel: String = r.get(4)?;
       let file_abs = root.join(&file_rel);
       let _ext: Option<String> = r.get(5)?;

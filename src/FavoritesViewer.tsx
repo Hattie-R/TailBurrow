@@ -123,6 +123,11 @@ export default function FavoritesViewer() {
   const hudHoverRef = useRef(false);
   const hudTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const HUD_TIMEOUT_MS = 2000; // 3–5 seconds; adjust
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMoreItems, setHasMoreItems] = useState(true);
+  const ITEMS_PER_PAGE = 100;
+  const loadingRef = useRef(false);
   const feedBreakpoints = {
     default: 3,
     1024: 3,
@@ -313,6 +318,14 @@ export default function FavoritesViewer() {
     await loadData();
   };
 
+  // Prefetch more items when user gets close to the end
+useEffect(() => {
+  const threshold = Math.max(0, items.length - 20);
+  if (hasMoreItems && !isLoadingMore && currentIndex >= threshold && items.length > 0) {
+    loadMoreItems();
+  }
+}, [currentIndex, items.length, hasMoreItems, isLoadingMore]);
+
   useEffect(() => {
     if (!showSettings) return;
 
@@ -375,10 +388,20 @@ export default function FavoritesViewer() {
   }, [viewerOverlay]);
 
   useEffect(() => {
-    loadData().catch(console.error);
-    refreshLibraryRoot().catch(console.error);
-    loadFeeds();
-    refreshE621CredInfo().catch(console.error);
+    const init = async () => {
+      setInitialLoading(true);
+      try {
+        await loadData();
+        await refreshLibraryRoot();
+        loadFeeds();
+        await refreshE621CredInfo();
+      } catch (error) {
+        console.error("Failed to initialize:", error);
+      } finally {
+        setInitialLoading(false);
+      }
+    };
+    init();
   }, []);
 
   // Calculate filtered items (must be before functions that use it)
@@ -566,49 +589,79 @@ useEffect(() => {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, [viewerOverlay]);
 
-    const loadData = async () => {
+    const loadData = async (append = false) => {
       try {
-        const rows = await invoke<ItemDto[]>("list_items");
+        const offset = append ? items.length : 0;
+        const rows = await invoke<ItemDto[]>("list_items", { 
+          limit: ITEMS_PER_PAGE, 
+          offset 
+        });
+
+        if (rows.length < ITEMS_PER_PAGE) {
+          setHasMoreItems(false);
+        } else {
+          setHasMoreItems(true);
+        }
 
         const mapped = rows.map((r) => {
-        const localUrl = convertFileSrc(r.file_abs);
+          const localUrl = convertFileSrc(r.file_abs);
 
-        return {
-        ...r,
-        // Keep your existing UI working:
-        url: localUrl,                // used by <img>/<video> and preloading
-        ext: r.ext,
-        id: Number(r.source_id),      // used for e621 links
-        artist: r.artists || [],
-        tags: r.tags || [],
-        sources: r.sources || [],
-        timestamp: r.timestamp,
-        // Optional: adapt score sorting
-        score: { total: r.score_total ?? 0 },
-        };
-    });
+          return {
+            ...r,
+            url: localUrl,
+            ext: r.ext,
+            id: Number(r.source_id),
+            artist: r.artists || [],
+            tags: r.tags || [],
+            sources: r.sources || [],
+            timestamp: r.timestamp,
+            score: { total: r.score_total ?? 0 },
+          };
+        });
 
-    setItems(mapped);
+        setItems(prev => {
+          const newItems = append ? [...prev, ...mapped] : mapped;
+          
+          // Update downloaded IDs
+          const downloaded = new Set<number>();
+          for (const it of newItems) {
+            if (it.source === "e621") downloaded.add(Number(it.source_id));
+          }
+          setDownloadedE621Ids(downloaded);
 
-    const downloaded = new Set<number>();
-    for (const it of mapped) {
-      if (it.source === "e621") downloaded.add(Number(it.source_id));
-    }
-    setDownloadedE621Ids(downloaded);
+          // Build tag list
+          const tags = new Set<string>();
+          newItems.forEach((item) => item.tags?.forEach((tag) => tags.add(tag)));
 
-    // Build tag list (same logic you already had)
-    const tags = new Set<string>();
-    mapped.forEach((item) => item.tags?.forEach((tag) => tags.add(tag)));
+          const sortedTags: string[] = Array.from(tags).sort((a, b) => {
+            const countA = newItems.filter((item) => item.tags?.includes(a)).length;
+            const countB = newItems.filter((item) => item.tags?.includes(b)).length;
+            return countB - countA;
+          });
+          setAllTags(sortedTags);
 
-    const sortedTags: string[] = Array.from(tags).sort((a, b) => {
-      const countA = mapped.filter((item) => item.tags?.includes(a)).length;
-      const countB = mapped.filter((item) => item.tags?.includes(b)).length;
-      return countB - countA;
-    });
-    setAllTags(sortedTags);
+          return newItems;
+        });
       } catch (error) {
         console.error("Failed to load library:", error);
         alert("Failed to load library. Please check your library settings.");
+      }
+    };
+
+    const loadMoreItems = async () => {
+      // Multiple guards to prevent double-loading
+      if (loadingRef.current) return;
+      if (isLoadingMore) return;
+      if (!hasMoreItems) return;
+      
+      loadingRef.current = true;
+      setIsLoadingMore(true);
+      
+      try {
+        await loadData(true);
+      } finally {
+        setIsLoadingMore(false);
+        loadingRef.current = false;
       }
     };
 
@@ -713,11 +766,6 @@ useEffect(() => {
       setLoadingFeeds(prev => ({ ...prev, [feedId]: false }));
     }
   };
-
-  // Reset to first item when filters change
-  useEffect(() => {
-    setCurrentIndex(0);
-  }, [filteredItems]);
 
   const toggleTag = (tag: string) => {
     setSelectedTags(prev =>
@@ -1054,7 +1102,13 @@ useEffect(() => {
             </div>
           </div>
 
-          {filteredItems.length > 0 ? (
+    {initialLoading ? (
+      // Spinner while first page loads
+      <div className="max-w-7xl mx-auto p-12 flex items-center justify-center">
+        <Loader2 className="w-10 h-10 animate-spin text-purple-500" />
+        <span className="ml-3 text-gray-400">Loading library...</span>
+      </div>
+    ) : filteredItems.length > 0 ? (
             <div className="max-w-7xl mx-auto p-4">
               <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
                 <div className="lg:col-span-3">
