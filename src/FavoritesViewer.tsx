@@ -450,7 +450,7 @@ export default function FavoritesViewer() {
                         {currentItem.artist?.map((artist, i) => (<span key={i}>{' • Artist: '}{i > 0 && ', '}<button onClick={() => openExternalUrl(`https://e621.net/posts?tags=${artist}`)} className="text-purple-400 hover:text-purple-300 underline cursor-pointer bg-transparent border-none p-0">{artist}</button></span>))}
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        {[...(currentItem.tags || [])].sort((a, b) => a.localeCompare(b)).slice(0, 20).map((tag, i) => (<button key={i} onClick={() => toggleTag(tag)} className={`px-2 py-1 rounded text-xs ${selectedTags.includes(tag) ? 'bg-purple-600' : 'bg-gray-700 hover:bg-gray-600'}`}>{tag}</button>))}
+                        {[...(currentItem.tags || [])].sort((a, b) => a.localeCompare(b)).map((tag, i) => (<button key={i} onClick={() => toggleTag(tag)} className={`px-2 py-1 rounded text-xs ${selectedTags.includes(tag) ? 'bg-purple-600' : 'bg-gray-700 hover:bg-gray-600'}`}>{tag}</button>))}
                       </div>
                     </div>
                   )}
