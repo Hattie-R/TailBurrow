@@ -732,6 +732,20 @@ pub fn e621_favorite(app: AppHandle, post_id: i64) -> Result<Status, String> {
 }
 
 #[tauri::command]
+pub fn get_library_stats(app: tauri::AppHandle) -> Result<u32, String> {
+  let root = get_root(&app)?;
+  let conn = db::open(&library::db_path(&root))?;
+
+  let count: u32 = conn.query_row(
+    "SELECT COUNT(*) FROM items WHERE trashed_at IS NULL",
+    [],
+    |row| row.get(0),
+  ).map_err(|e| e.to_string())?;
+
+  Ok(count)
+}
+
+#[tauri::command]
 pub fn list_items(
     app: tauri::AppHandle,  // <-- ADD THIS
     limit: Option<u32>, 

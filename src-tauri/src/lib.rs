@@ -34,6 +34,7 @@ pub fn run() {
       commands::set_library_root,
       commands::list_items,
       commands::trash_item,
+      commands::get_library_stats,
       commands::e621_get_cred_info,
       commands::e621_set_credentials,
       commands::e621_test_connection,

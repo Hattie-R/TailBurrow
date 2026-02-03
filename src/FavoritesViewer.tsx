@@ -126,7 +126,7 @@ export default function FavoritesViewer() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMoreItems, setHasMoreItems] = useState(true);
-  const ITEMS_PER_PAGE = 100;
+  const [totalDatabaseItems, setTotalDatabaseItems] = useState(0);
   const loadingRef = useRef(false);
   const feedBreakpoints = {
     default: 3,
@@ -134,6 +134,15 @@ export default function FavoritesViewer() {
     768: 2,
     520: 1,
   };
+
+    const [itemsPerPage, setItemsPerPage] = useState(() => {
+      try {
+        const saved = localStorage.getItem('items_per_page');
+        return saved ? Number(saved) : 100;
+      } catch {
+        return 100;
+      }
+    });
 
   const scheduleHudHide = useCallback(() => {
     if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
@@ -546,6 +555,19 @@ useEffect(() => {
       alert("Failed to open link in browser");
     }
   };
+  const handlePageSizeChange = async (newSize: number) => {
+    setItemsPerPage(newSize);
+    localStorage.setItem('items_per_page', String(newSize));
+    
+    // Reload data from scratch with new size
+    setInitialLoading(true);
+    try {
+      // Reset items and hasMoreItems state implicitly via loadData(false)
+      await loadData(false);
+    } finally {
+      setInitialLoading(false);
+    }
+  };
 
   const getSocialMediaName = (url: string): string => {
     try {
@@ -592,48 +614,45 @@ useEffect(() => {
     const loadData = async (append = false) => {
       try {
         const offset = append ? items.length : 0;
+        
+        // 1. Load the items
         const rows = await invoke<ItemDto[]>("list_items", { 
-          limit: ITEMS_PER_PAGE, 
+          limit: itemsPerPage, // Use state variable here
           offset 
         });
 
-        if (rows.length < ITEMS_PER_PAGE) {
+        // 2. If it's the first load (not appending), get the total count
+        if (!append) {
+          const total = await invoke<number>("get_library_stats");
+          setTotalDatabaseItems(total);
+        }
+
+        if (rows.length < itemsPerPage) {
           setHasMoreItems(false);
         } else {
           setHasMoreItems(true);
         }
 
-        const mapped = rows.map((r) => {
-          const localUrl = convertFileSrc(r.file_abs);
-
-          return {
-            ...r,
-            url: localUrl,
-            ext: r.ext,
-            id: Number(r.source_id),
-            artist: r.artists || [],
-            tags: r.tags || [],
-            sources: r.sources || [],
-            timestamp: r.timestamp,
-            score: { total: r.score_total ?? 0 },
-          };
+        // ... rest of your mapping logic stays the same ...
+        const mapped = rows.map((r) => { 
+            // ... existing mapping code ...
+            const localUrl = convertFileSrc(r.file_abs);
+            return { ...r, url: localUrl, ext: r.ext, id: Number(r.source_id), artist: r.artists||[], tags: r.tags||[], sources: r.sources||[], timestamp: r.timestamp, score: { total: r.score_total ?? 0 } };
         });
 
         setItems(prev => {
+          // ... existing set items logic ...
           const newItems = append ? [...prev, ...mapped] : mapped;
           
-          // Update downloaded IDs
+          // Update downloaded IDs logic...
           const downloaded = new Set<number>();
-          for (const it of newItems) {
-            if (it.source === "e621") downloaded.add(Number(it.source_id));
-          }
+          for (const it of newItems) { if (it.source === "e621") downloaded.add(Number(it.source_id)); }
           setDownloadedE621Ids(downloaded);
 
-          // Build tag list
+          // Build tag list logic...
           const tags = new Set<string>();
           newItems.forEach((item) => item.tags?.forEach((tag) => tags.add(tag)));
-
-          const sortedTags: string[] = Array.from(tags).sort((a, b) => {
+          const sortedTags = Array.from(tags).sort((a, b) => {
             const countA = newItems.filter((item) => item.tags?.includes(a)).length;
             const countB = newItems.filter((item) => item.tags?.includes(b)).length;
             return countB - countA;
@@ -642,9 +661,9 @@ useEffect(() => {
 
           return newItems;
         });
+
       } catch (error) {
         console.error("Failed to load library:", error);
-        alert("Failed to load library. Please check your library settings.");
       }
     };
 
@@ -736,7 +755,6 @@ useEffect(() => {
 
       const newPosts = data.posts || [];
 
-      // append + dedupe by id
       // append + dedupe by id
       setFeedPosts(prev => {
         const existing = reset ? [] : (prev[feedId] || []);
@@ -896,7 +914,24 @@ useEffect(() => {
                   </div>
                 </div>
               </div>
-
+              {/* Page Size Setting */}
+              <div className="mt-3">
+                <label className="text-sm text-gray-400 mb-1 block">Items to load per batch</label>
+                <select
+                  value={itemsPerPage}
+                  onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
+                >
+                  <option value={50}>50</option>
+                  <option value={100}>100 (Recommended)</option>
+                  <option value={200}>200</option>
+                  <option value={500}>500</option>
+                  <option value={1000}>1000 (May be slow)</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  Lower values load faster, higher values show more items at once.
+                </p>
+              </div>
                 {/* Credentials */}
               <div className="border-t border-gray-700 pt-4 mt-4">
                 <h3 className="text-lg font-semibold mb-2">e621</h3>
@@ -1081,7 +1116,13 @@ useEffect(() => {
                 </select>
 
                 <div className="text-gray-400">
-                  {filteredItems.length} / {items.length} items
+                  <div className="text-gray-400 text-sm">
+                    Showing {filteredItems.length} 
+                    <span className="mx-1">•</span> 
+                    Loaded {items.length} 
+                    <span className="mx-1">•</span> 
+                    Total {totalDatabaseItems}
+                  </div>
                 </div>
               </div>
 
