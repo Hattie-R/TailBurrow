@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Search, Upload, Play, Pause, ChevronLeft, ChevronRight,
   X, Tag, Trash2, Rss, Plus, Star, Maximize, Settings,
-  Database, Loader2, Volume2, VolumeX, Clock
+  Database, Loader2, Volume2, VolumeX, Clock, Pencil
 } from "lucide-react";
 
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
@@ -129,6 +129,9 @@ export default function FavoritesViewer() {
   const [hasMoreItems, setHasMoreItems] = useState(true);
   const [totalDatabaseItems, setTotalDatabaseItems] = useState(0);
   const loadingRef = useRef(false);
+  const [editingFeedId, setEditingFeedId] = useState<number | null>(null);
+  const [selectedFeedId, setSelectedFeedId] = useState<number | null>(null);
+  const [showAddFeedModal, setShowAddFeedModal] = useState(false);
   const feedBreakpoints = {
     default: 3,
     1024: 3,
@@ -737,20 +740,6 @@ useEffect(() => {
   const saveFeeds = (newFeeds: Feed[]) => {
     localStorage.setItem("e621_feeds", JSON.stringify(newFeeds));
     setFeeds(newFeeds);
-  };
-
-  const addFeed = () => {
-    if (!newFeedQuery.trim()) return;
-    
-    const feed = {
-      id: Date.now(),
-      name: newFeedName.trim() || newFeedQuery,
-      query: newFeedQuery.trim()
-    };
-    
-    saveFeeds([...feeds, feed]);
-    setNewFeedQuery('');
-    setNewFeedName('');
   };
 
   const removeFeed = (feedId: number) => {
@@ -1467,19 +1456,22 @@ useEffect(() => {
                         )}
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        {currentItem.tags?.slice(0, 20).map((tag, i) => (
-                          <button
-                            key={i}
-                            onClick={() => toggleTag(tag)}
-                            className={`px-2 py-1 rounded text-xs ${
-                              selectedTags.includes(tag)
-                                ? 'bg-purple-600'
-                                : 'bg-gray-700 hover:bg-gray-600'
-                            }`}
-                          >
-                            {tag}
-                          </button>
-                        ))}
+                        {[...(currentItem.tags || [])]
+                          .sort((a, b) => a.localeCompare(b))
+                          .slice(0, 20)
+                          .map((tag, i) => (
+                            <button
+                              key={i}
+                              onClick={() => toggleTag(tag)}
+                              className={`px-2 py-1 rounded text-xs ${
+                                selectedTags.includes(tag)
+                                  ? 'bg-purple-600'
+                                  : 'bg-gray-700 hover:bg-gray-600'
+                              }`}
+                            >
+                              {tag}
+                            </button>
+                          ))}
                       </div>
                     </div>
                   )}
@@ -1524,165 +1516,306 @@ useEffect(() => {
       {/* Feeds Tab */}
       {activeTab === 'feeds' && (
         <div className="max-w-7xl mx-auto p-4">
-          {/* Add Feed */}
-          <div className="bg-gray-800 rounded-lg p-4 mb-6">
-            <h3 className="text-lg font-semibold mb-3">Add New Feed</h3>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Feed name (optional)"
-                value={newFeedName}
-                onChange={(e) => setNewFeedName(e.target.value)}
-                className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
-              />
-              <input
-                type="text"
-                placeholder="e621 search query (e.g. rating:s score:>200)"
-                value={newFeedQuery}
-                onChange={(e) => setNewFeedQuery(e.target.value)}
-                className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
-              />
+          {/* Feed selector buttons - SMALLER */}
+          <div className="flex justify-center items-center gap-2 mb-6 flex-wrap">
+            {feeds.map((feed) => (
               <button
-                onClick={addFeed}
-                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded flex items-center gap-2"
+                key={feed.id}
+                onClick={() => setSelectedFeedId(feed.id)}
+                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                  selectedFeedId === feed.id
+                    ? 'bg-purple-600 text-white shadow-lg scale-105'
+                    : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                }`}
               >
-                <Plus className="w-4 h-4" />
-                Add
+                {feed.name}
               </button>
-            </div>
+            ))}
+            
+            <button
+              onClick={() => setShowAddFeedModal(true)}
+              className="px-4 py-2 rounded-full text-sm font-medium bg-gray-800 text-gray-300 hover:bg-gray-700 transition-all flex items-center gap-2"
+            >
+              <Plus className="w-4 h-4" />
+              Add Feed
+            </button>
           </div>
 
-          {/* Feed List */}
-          {feeds.map(feed => (
-            <div key={feed.id} className="bg-gray-800 rounded-lg p-4 mb-4">
-              <div className="flex items-center justify-between mb-3">
-                <div>
-                  <h3 className="text-lg font-semibold">{feed.name}</h3>
-                  <p className="text-sm text-gray-400">{feed.query}</p>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => fetchFeedPosts(feed.id, feed.query, { reset: true })}
-                    disabled={loadingFeeds[feed.id]}
-                    className="px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded text-sm disabled:opacity-50"
-                  >
-                    {loadingFeeds[feed.id] ? 'Loading...' : 'Load'}
-                  </button>
-                  <button
-                    onClick={() => removeFeed(feed.id)}
-                    className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-sm"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Pinterest-style Masonry Grid */}
-              {feedPosts[feed.id] && feedPosts[feed.id].length > 0 && (
-                <Masonry
-                  breakpointCols={feedBreakpoints}
-                  className="flex w-auto gap-3"
-                  columnClassName="flex flex-col gap-3"
-                >
-                  {feedPosts[feed.id].map((post) => {
-                    const busy = !!feedActionBusy[post.id];
-                    const isRemoteFav = !!post.is_favorited;
-                    const imageUrl = post.sample?.url || post.file?.url || post.preview?.url;
-                    const sourceUrl = `https://e621.net/posts/${post.id}`;
-                    const artists = post.tags?.artist || [];
-
-                    // (optional) reserve space to reduce layout shift while loading
-                    const w = post.sample?.width || post.file?.width || 1;
-                    const h = post.sample?.height || post.file?.height || 1;
-
-                    return (
-                      <div
-                        key={post.id}
-                        className="relative group bg-gray-700 rounded overflow-hidden"
-                      >
-                        {downloadedE621Ids.has(post.id) && (
-                          <div className="absolute top-2 left-2 z-20 bg-gray-900/70 text-gray-200 px-2 py-1 rounded flex items-center gap-1">
-                            <Database className="w-4 h-4" />
-                          </div>
-                        )}
-                        {imageUrl ? (
-                          <>
-                            <img
-                              src={imageUrl}
-                              alt=""
-                              className="w-full object-cover rounded"
-                              style={{ aspectRatio: `${w} / ${h}` }}
-                              loading="lazy"
-                              referrerPolicy="no-referrer"
-                            />
-                            <button
-                              onClick={() => ensureFavorite(feed.id, post)}
-                              disabled={busy}
-                              className={`absolute top-2 right-2 p-2 rounded-full transition z-20 ${
-                                isRemoteFav
-                                  ? "bg-yellow-500 text-yellow-900"
-                                  : "bg-gray-900/70 text-gray-300 hover:bg-gray-900/90"
-                              } ${busy ? "opacity-60 cursor-not-allowed" : ""}`}
-                            >
-                              {busy ? (
-                                <Loader2 className="w-5 h-5 animate-spin" />
-                              ) : (
-                                <Star className={`w-5 h-5 ${isRemoteFav ? "fill-current" : ""}`} />
-                              )}
-                            </button>
-
-                            <div
-                              className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-2 z-10"
-                              style={{ backgroundColor: "rgba(0, 0, 0, 0.5)" }}
-                            >
-                              <p className="text-xs text-white">
-                                Score: {post.score?.total || 0} | ❤️ {post.fav_count || 0}
-                              </p>
-                              {artists.length > 0 && (
-                                <p className="text-xs text-gray-300">
-                                  {artists.slice(0, 2).join(", ")}
-                                </p>
-                              )}
-                              <button
-                                onClick={() => openExternalUrl(sourceUrl)}
-                                className="px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded text-xs text-white"
-                              >
-                                View Source
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <div className="w-full h-48 flex items-center justify-center bg-gray-800">
-                            <p className="text-gray-500 text-sm">No image</p>
-                          </div>
-                        )}
+          {/* Selected feed content */}
+          {selectedFeedId && feeds.find(f => f.id === selectedFeedId) && (
+            <div className="bg-gray-800 rounded-lg p-4">
+              {(() => {
+                const feed = feeds.find(f => f.id === selectedFeedId)!;
+                return (
+                  <>
+                    <div className="flex items-center justify-between mb-4">
+                      <div>
+                        <h2 className="text-2xl font-bold">{feed.name}</h2>
+                        <p className="text-sm text-gray-400 mt-1">{feed.query}</p>
                       </div>
-                    );
-                  })}
-                </Masonry>
-              )}
-              <InfiniteSentinel
-                disabled={
-                  !e621CredInfo.username ||
-                  !e621CredInfo.has_api_key ||
-                  !!loadingFeeds[feed.id] ||
-                  !!feedPaging[feed.id]?.done
-                }
-                onVisible={() => fetchFeedPosts(feed.id, feed.query)}
-              />
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => fetchFeedPosts(feed.id, feed.query, { reset: true })}
+                          disabled={loadingFeeds[feed.id]}
+                          className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50 flex items-center gap-2"
+                        >
+                          {loadingFeeds[feed.id] ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Loading...
+                            </>
+                          ) : (
+                            'Refresh'
+                          )}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setNewFeedName(feed.name);
+                            setNewFeedQuery(feed.query);
+                            setShowAddFeedModal(true);
+                            // We'll handle this as edit mode
+                            setEditingFeedId(feed.id);
+                          }}
+                          className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
+                          title="Edit feed"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            removeFeed(feed.id);
+                            setSelectedFeedId(null);
+                          }}
+                          className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded"
+                          title="Delete feed"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
 
-              {feedPaging[feed.id]?.done && (
-                <div className="text-center text-gray-500 text-sm py-4">
-                  End of results
-                </div>
-              )}
+                    {/* Masonry Grid or empty state */}
+                    {feedPosts[feed.id] && feedPosts[feed.id].length > 0 ? (
+                      <>
+                        <Masonry
+                          breakpointCols={feedBreakpoints}
+                          className="flex w-auto gap-3"
+                          columnClassName="flex flex-col gap-3"
+                        >
+                          {feedPosts[feed.id].map((post) => {
+                            const busy = !!feedActionBusy[post.id];
+                            const isRemoteFav = !!post.is_favorited;
+                            const imageUrl = post.sample?.url || post.file?.url || post.preview?.url;
+                            const sourceUrl = `https://e621.net/posts/${post.id}`;
+                            const artists = post.tags?.artist || [];
+                            const w = post.sample?.width || post.file?.width || 1;
+                            const h = post.sample?.height || post.file?.height || 1;
+
+                            return (
+                              <div
+                                key={post.id}
+                                className="relative group bg-gray-700 rounded overflow-hidden"
+                              >
+                                {downloadedE621Ids.has(post.id) && (
+                                  <div className="absolute top-2 left-2 z-20 bg-gray-900/70 text-gray-200 px-2 py-1 rounded flex items-center gap-1">
+                                    <Database className="w-4 h-4" />
+                                  </div>
+                                )}
+                                {imageUrl ? (
+                                  <>
+                                    <img
+                                      src={imageUrl}
+                                      alt=""
+                                      className="w-full object-cover rounded"
+                                      style={{ aspectRatio: `${w} / ${h}` }}
+                                      loading="lazy"
+                                      referrerPolicy="no-referrer"
+                                    />
+                                    <button
+                                      onClick={() => ensureFavorite(feed.id, post)}
+                                      disabled={busy}
+                                      className={`absolute top-2 right-2 p-2 rounded-full transition z-20 ${
+                                        isRemoteFav
+                                          ? "bg-yellow-500 text-yellow-900"
+                                          : "bg-gray-900/70 text-gray-300 hover:bg-gray-900/90"
+                                      } ${busy ? "opacity-60 cursor-not-allowed" : ""}`}
+                                    >
+                                      {busy ? (
+                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                      ) : (
+                                        <Star className={`w-5 h-5 ${isRemoteFav ? "fill-current" : ""}`} />
+                                      )}
+                                    </button>
+
+                                    <div
+                                      className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-2 z-10"
+                                      style={{ backgroundColor: "rgba(0, 0, 0, 0.5)" }}
+                                    >
+                                      <p className="text-xs text-white">
+                                        Score: {post.score?.total || 0} | ❤️ {post.fav_count || 0}
+                                      </p>
+                                      {artists.length > 0 && (
+                                        <p className="text-xs text-gray-300">
+                                          {artists.slice(0, 2).join(", ")}
+                                        </p>
+                                      )}
+                                      <button
+                                        onClick={() => openExternalUrl(sourceUrl)}
+                                        className="px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded text-xs text-white"
+                                      >
+                                        View Source
+                                      </button>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <div className="w-full h-48 flex items-center justify-center bg-gray-800">
+                                    <p className="text-gray-500 text-sm">No image</p>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </Masonry>
+                        
+                        <InfiniteSentinel
+                          disabled={
+                            !e621CredInfo.username ||
+                            !e621CredInfo.has_api_key ||
+                            !!loadingFeeds[feed.id] ||
+                            !!feedPaging[feed.id]?.done
+                          }
+                          onVisible={() => fetchFeedPosts(feed.id, feed.query)}
+                        />
+
+                        {feedPaging[feed.id]?.done && (
+                          <div className="text-center text-gray-500 text-sm py-4">
+                            End of results
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="text-center py-20 text-gray-400 italic">
+                        "Nobody here but us dergs"
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
-          ))}
+          )}
+
+          {/* Empty state when no feed selected */}
+          {!selectedFeedId && feeds.length > 0 && (
+            <div className="text-center py-20 text-gray-400">
+              <p className="text-xl mb-2">Select a feed to view posts</p>
+              <p className="text-sm">Click on one of the feeds above</p>
+            </div>
+          )}
+
+          {/* Empty state when no feeds exist - NO BUTTON */}
           {feeds.length === 0 && (
             <div className="text-center py-20 text-gray-400">
               <Rss className="w-16 h-16 mx-auto mb-4 opacity-50" />
               <p className="text-xl">No feeds yet</p>
-              <p className="text-sm mt-2">Add your first e621 search query above</p>
+              <p className="text-sm mt-2">Click the "Add Feed" button above to get started</p>
+            </div>
+          )}
+
+          {/* Add/Edit Feed Modal */}
+          {showAddFeedModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <div
+                className="absolute inset-0 bg-black/60"
+                onClick={() => {
+                  setShowAddFeedModal(false);
+                  setEditingFeedId(null);
+                  setNewFeedName('');
+                  setNewFeedQuery('');
+                }}
+              />
+              <div className="relative z-10 w-full max-w-xl bg-gray-800 border border-gray-700 rounded-lg p-6">
+                <h2 className="text-2xl font-bold mb-4">
+                  {editingFeedId ? 'Edit Feed' : 'Add New Feed'}
+                </h2>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-sm text-gray-400 mb-1 block">Feed Name</label>
+                    <input
+                      type="text"
+                      placeholder="e.g., Cute Foxes"
+                      value={newFeedName}
+                      onChange={(e) => setNewFeedName(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="text-sm text-gray-400 mb-1 block">Search Query</label>
+                    <input
+                      type="text"
+                      placeholder="e.g., fox cute rating:s score:>200"
+                      value={newFeedQuery}
+                      onChange={(e) => setNewFeedQuery(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Use e621 search syntax. Example: species:fox rating:s
+                    </p>
+                  </div>
+                  
+                  <div className="flex gap-3 justify-end">
+                    <button
+                      onClick={() => {
+                        setNewFeedName('');
+                        setNewFeedQuery('');
+                        setShowAddFeedModal(false);
+                        setEditingFeedId(null);
+                      }}
+                      className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!newFeedQuery.trim()) {
+                          alert('Please enter a search query');
+                          return;
+                        }
+                        
+                        if (editingFeedId) {
+                          // Edit existing feed
+                          const updatedFeeds = feeds.map(f =>
+                            f.id === editingFeedId
+                              ? { ...f, name: newFeedName.trim() || newFeedQuery, query: newFeedQuery.trim() }
+                              : f
+                          );
+                          saveFeeds(updatedFeeds);
+                          setEditingFeedId(null);
+                        } else {
+                          // Create new feed
+                          const feed = {
+                            id: Date.now(),
+                            name: newFeedName.trim() || newFeedQuery,
+                            query: newFeedQuery.trim()
+                          };
+                          saveFeeds([...feeds, feed]);
+                          setSelectedFeedId(feed.id);
+                          // Auto-load the new feed
+                          fetchFeedPosts(feed.id, feed.query, { reset: true });
+                        }
+                        
+                        setNewFeedQuery('');
+                        setNewFeedName('');
+                        setShowAddFeedModal(false);
+                      }}
+                      className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded"
+                    >
+                      {editingFeedId ? 'Save Changes' : 'Create Feed'}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </div>
