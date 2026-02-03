@@ -732,6 +732,22 @@ pub fn e621_favorite(app: AppHandle, post_id: i64) -> Result<Status, String> {
 }
 
 #[tauri::command]
+pub fn clear_library_root(app: tauri::AppHandle) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("config.json");
+
+    // Remove the config file entirely, or write an empty config
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_library_stats(app: tauri::AppHandle) -> Result<u32, String> {
   let root = get_root(&app)?;
   let conn = db::open(&library::db_path(&root))?;

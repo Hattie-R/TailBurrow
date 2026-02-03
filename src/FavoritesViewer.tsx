@@ -9,6 +9,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import Masonry from "react-masonry-css";
+import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 /* =========================
    Types
@@ -879,10 +880,35 @@ useEffect(() => {
                     Change Library Folder
                   </button>
                   <button
-                    onClick={() => setShowSettings(false)}
-                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
+                    onClick={async () => {
+                      const ok = await confirmDialog(
+                        "Unload the current library?\nYou’ll need to select a folder again next time.",
+                        {
+                          title: "Unload Library",
+                          okLabel: "Yes, unload",
+                          cancelLabel: "Cancel"
+                        }
+                      );
+
+                      if (!ok) return;
+
+                      try {
+                        await invoke("clear_library_root");
+                        setLibraryRoot("");
+                        setItems([]);
+                        setAllTags([]);
+                        setTotalDatabaseItems(0);
+                        setHasMoreItems(true);
+                        setDownloadedE621Ids(new Set());
+                        setShowSettings(false);
+                      } catch (err) {
+                        console.error("Failed to unload library:", err);
+                        alert("Failed to unload library: " + String(err));
+                      }
+                    }}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded transition-colors"
                   >
-                    Close
+                    Unload Library
                   </button>
                 </div>
 
