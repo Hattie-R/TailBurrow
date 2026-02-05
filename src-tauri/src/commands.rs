@@ -748,6 +748,47 @@ pub fn clear_library_root(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn update_item_tags(app: tauri::AppHandle, item_id: i64, tags: Vec<String>) -> Result<(), String> {
+    let root = get_root(&app)?;
+    let mut conn = db::open(&library::db_path(&root))?;
+    
+    // Use a transaction to ensure all or nothing
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // 1. Remove ALL existing tags for this item
+    tx.execute("DELETE FROM item_tags WHERE item_id = ?", [item_id])
+        .map_err(|e| e.to_string())?;
+
+    // 2. Add the new list
+    for tag in tags {
+        let clean_tag = tag.trim().to_lowercase();
+        if clean_tag.is_empty() { continue; }
+
+        // Ensure tag exists in the 'tags' table (defaulting to 'general' type)
+        tx.execute(
+            "INSERT OR IGNORE INTO tags (name, type) VALUES (?, 'general')",
+            [&clean_tag]
+        ).map_err(|e| e.to_string())?;
+
+        // Get the tag's ID
+        let tag_id: i64 = tx.query_row(
+            "SELECT tag_id FROM tags WHERE name = ?",
+            [&clean_tag],
+            |row| row.get(0)
+        ).map_err(|e| e.to_string())?;
+
+        // Link item to tag
+        tx.execute(
+            "INSERT INTO item_tags (item_id, tag_id) VALUES (?, ?)",
+            [item_id, tag_id]
+        ).map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn e621_clear_credentials(app: tauri::AppHandle) -> Result<(), String> {
     let path = app
         .path()

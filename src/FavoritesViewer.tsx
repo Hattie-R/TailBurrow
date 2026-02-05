@@ -84,6 +84,11 @@ export default function FavoritesViewer() {
   const HUD_TIMEOUT_MS = 2000;
   const feedBreakpoints = { default: 3, 1024: 3, 768: 2, 520: 1 };
 
+  // Other
+  const [showTagModal, setShowTagModal] = useState(false);
+  const [editingTags, setEditingTags] = useState<string[]>([]);
+  const [newTagInput, setNewTagInput] = useState("");
+
   // --- DERIVED STATE (useMemo) ---
   const filteredItems = useMemo(() => {
     let filtered = items;
@@ -255,7 +260,28 @@ export default function FavoritesViewer() {
   };
   const toggleTag = (tag: string) => setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
   const deleteCurrentItem = async () => { if (!currentItem) return; await invoke("trash_item", { itemId: currentItem.item_id }); await loadData(); };
+  const saveTags = async () => {
+    if (!currentItem) return;
+    
+    try {
+      await invoke("update_item_tags", { 
+        itemId: currentItem.item_id, 
+        tags: editingTags 
+      });
 
+      // Update local state immediately so UI reflects changes
+      setItems(prev => prev.map(item => 
+        item.item_id === currentItem.item_id 
+          ? { ...item, tags: editingTags } 
+          : item
+      ));
+
+      setShowTagModal(false);
+    } catch (error) {
+      console.error("Failed to update tags:", error);
+      alert("Failed to save tags: " + String(error));
+    }
+  };
   // --- EFFECTS ---
   // Build allTags whenever items change
   useEffect(() => {
@@ -450,7 +476,36 @@ export default function FavoritesViewer() {
                         {currentItem.artist?.map((artist, i) => (<span key={i}>{' • Artist: '}{i > 0 && ', '}<button onClick={() => openExternalUrl(`https://e621.net/posts?tags=${artist}`)} className="text-purple-400 hover:text-purple-300 underline cursor-pointer bg-transparent border-none p-0">{artist}</button></span>))}
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        {[...(currentItem.tags || [])].sort((a, b) => a.localeCompare(b)).map((tag, i) => (<button key={i} onClick={() => toggleTag(tag)} className={`px-2 py-1 rounded text-xs ${selectedTags.includes(tag) ? 'bg-purple-600' : 'bg-gray-700 hover:bg-gray-600'}`}>{tag}</button>))}
+                        <div className="flex flex-wrap gap-2 items-center">
+                          {/* NEW EDIT BUTTON */}
+                          <button
+                            onClick={() => {
+                              setEditingTags([...(currentItem.tags || [])]);
+                              setNewTagInput("");
+                              setShowTagModal(true);
+                            }}
+                            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 hover:text-white transition-colors"
+                            title="Edit Tags"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Existing Tag List */}
+                          {[...(currentItem.tags || [])]
+                            .sort((a, b) => a.localeCompare(b))
+                            .map((tag, i) => (
+                              <button
+                                key={i}
+                                onClick={() => toggleTag(tag)}
+                                className={`px-2 py-1 rounded text-xs ${
+                                  selectedTags.includes(tag)
+                                    ? 'bg-purple-600'
+                                    : 'bg-gray-700 hover:bg-gray-600'
+                                }`}
+                              >{tag}
+                              </button>
+                            ))}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -466,7 +521,46 @@ export default function FavoritesViewer() {
               </div>
             </div>
           ) : (
-            <div className="text-center py-20 text-gray-400"><Upload className="w-16 h-16 mx-auto mb-4 opacity-50" /><p className="text-xl">No items yet</p><p className="text-sm mt-2">Open Settings → Sync Favorites to download your library</p></div>
+  <div className="text-center py-20 text-gray-400">
+    {!libraryRoot ? (
+      // STATE 1: First Run / No Library
+      <div className="animate-in fade-in zoom-in duration-300">
+        <Database className="w-20 h-20 mx-auto mb-6 text-purple-500 opacity-80" />
+        <h2 className="text-3xl font-bold text-white mb-3">Welcome!</h2>
+        <p className="text-gray-400 mb-8 max-w-md mx-auto">
+          To get started, select a folder where your favorites will be stored.
+          <br />
+          <span className="text-sm opacity-75">(You can create a new empty folder or select an existing one)</span>
+        </p>
+        <button
+          onClick={changeLibraryRoot}
+          className="px-8 py-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-lg shadow-lg hover:shadow-purple-500/20 transition-all transform hover:-translate-y-1"
+        >
+          Select Library Folder
+        </button>
+      </div>
+    ) : (
+      // STATE 2: Library Selected but Empty
+      <div>
+        <Upload className="w-16 h-16 mx-auto mb-4 opacity-50" />
+        <p className="text-xl font-semibold text-gray-200">Library is Ready</p>
+        <p className="text-sm mt-2 mb-6 text-gray-400">
+          Your database is set up at:
+          <br />
+          <span className="font-mono text-xs bg-gray-800 px-2 py-1 rounded mt-1 inline-block">{libraryRoot}</span>
+        </p>
+        <div className="p-4 bg-gray-800 rounded-lg max-w-md mx-auto border border-gray-700">
+          <p className="text-sm mb-3">Go to <b>Settings → e621</b> to log in and sync your favorites.</p>
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
+          >
+            Open Settings
+          </button>
+        </div>
+      </div>
+    )}
+  </div>
           )}
         </>
       )}
@@ -560,7 +654,7 @@ export default function FavoritesViewer() {
             <div className="overflow-y-auto p-5 space-y-4">
               <div><h3 className="text-lg font-semibold mb-2">Library</h3>
                 <div className="text-sm text-gray-400 mb-1">Library folder</div><div className="text-xs text-gray-200 break-all bg-gray-900 border border-gray-700 rounded p-2">{libraryRoot || "(not set)"}</div>
-                <div className="flex gap-2 mt-3"><button onClick={changeLibraryRoot} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded">Change Folder</button><button onClick={async () => { const ok = await confirmDialog("Unload the current library?", { title: "Unload Library", okLabel: "Yes, unload", cancelLabel: "Cancel" }); if (!ok) return; try { await invoke("clear_library_root"); setLibraryRoot(""); setItems([]); setAllTags([]); setTotalDatabaseItems(0); setHasMoreItems(true); setDownloadedE621Ids(new Set()); setShowSettings(false); } catch (e) { console.error("Failed to unload:", e); alert("Failed to unload: " + String(e)); } }} className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded">Unload Library</button></div>
+                <div className="flex gap-2 mt-3"><button onClick={changeLibraryRoot} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded">Change / Create Librar</button><button onClick={async () => { const ok = await confirmDialog("Unload the current library?", { title: "Unload Library", okLabel: "Yes, unload", cancelLabel: "Cancel" }); if (!ok) return; try { await invoke("clear_library_root"); setLibraryRoot(""); setItems([]); setAllTags([]); setTotalDatabaseItems(0); setHasMoreItems(true); setDownloadedE621Ids(new Set()); setShowSettings(false); } catch (e) { console.error("Failed to unload:", e); alert("Failed to unload: " + String(e)); } }} className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded">Unload Library</button></div>
               </div>
               <div className="border-t border-gray-700 pt-4"><h3 className="text-lg font-semibold mb-2">Viewer</h3>
                 <div><label className="text-sm text-gray-400 mb-1 block">Default sort order</label><select value={sortOrder} onChange={(e) => setSortOrder(e.target.value)} className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"><option value="default">Default</option><option value="random">Random</option><option value="score">Score</option><option value="newest">Newest</option><option value="oldest">Oldest</option></select></div>
@@ -596,6 +690,87 @@ export default function FavoritesViewer() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Edit Tags Modal */}
+      {showTagModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setShowTagModal(false)} />
+          <div className="relative z-10 w-full max-w-lg bg-gray-800 border border-gray-700 rounded-lg p-6 flex flex-col max-h-[80vh]">
+            <h2 className="text-xl font-bold mb-4">Edit Tags</h2>
+            
+            {/* Input */}
+            <div className="flex gap-2 mb-4">
+              <input
+                type="text"
+                placeholder="Add a tag..."
+                value={newTagInput}
+                onChange={(e) => setNewTagInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newTagInput.trim()) {
+                    e.preventDefault();
+                    const tag = newTagInput.trim().toLowerCase();
+                    if (!editingTags.includes(tag)) {
+                      setEditingTags([...editingTags, tag]);
+                    }
+                    setNewTagInput("");
+                  }
+                }}
+                className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
+                autoFocus
+              />
+              <button
+                onClick={() => {
+                  if (newTagInput.trim()) {
+                    const tag = newTagInput.trim().toLowerCase();
+                    if (!editingTags.includes(tag)) {
+                      setEditingTags([...editingTags, tag]);
+                    }
+                    setNewTagInput("");
+                  }
+                }}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded"
+              >
+                Add
+              </button>
+            </div>
+
+            {/* Tag List */}
+            <div className="flex-1 overflow-y-auto p-2 bg-gray-900/50 rounded border border-gray-700 mb-4 content-start">
+              <div className="flex flex-wrap gap-2">
+                {editingTags.map(tag => (
+                  <span key={tag} className="px-2 py-1 bg-purple-900/50 border border-purple-500/30 rounded text-sm flex items-center gap-1">
+                    {tag}
+                    <button
+                      onClick={() => setEditingTags(editingTags.filter(t => t !== tag))}
+                      className="hover:text-red-400"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
+                {editingTags.length === 0 && (
+                  <div className="text-gray-500 italic text-sm p-2">No tags yet.</div>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowTagModal(false)}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveTags}
+                className="px-6 py-2 bg-purple-600 hover:bg-purple-700 rounded font-medium"
+              >
+                Save Tags
+              </button>
             </div>
           </div>
         </div>

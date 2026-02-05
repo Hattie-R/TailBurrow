@@ -36,6 +36,7 @@ pub fn run() {
       commands::trash_item,
       commands::get_library_stats,
       commands::clear_library_root,
+      commands::update_item_tags,
       commands::e621_clear_credentials,
       commands::e621_get_cred_info,
       commands::e621_set_credentials,
