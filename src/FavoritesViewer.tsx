@@ -98,7 +98,7 @@ export default function FavoritesViewer() {
   const [faStatus, setFaStatus] = useState<FASyncStatus | null>(null);
   const [filterSource, setFilterSource] = useState('all'); // for filtering view
 
-  const filteredItems = items; 
+  const filteredItems = items;
 
   const currentItem = filteredItems[currentIndex];
   const ext = (currentItem?.ext || "").toLowerCase();
