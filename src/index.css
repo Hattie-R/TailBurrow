@@ -31,3 +31,10 @@
 *::-webkit-scrollbar-corner {
   background: rgb(17, 24, 39);
 }
+html, body {
+  background-color: rgb(17, 24, 39); /* Matches bg-gray-900 */
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
