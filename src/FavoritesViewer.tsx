@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Search, Upload, Play, Pause, ChevronLeft, ChevronRight,
   X, Tag, Trash2, Rss, Plus, Star, Maximize, Settings,
@@ -92,42 +92,13 @@ export default function FavoritesViewer() {
   const [newTagInput, setNewTagInput] = useState("");
   const [filterRating, setFilterRating] = useState('all');
 
+
   // FurAffinity
   const [faCreds, setFaCreds] = useState<FACreds>({ a: '', b: '' });
   const [faStatus, setFaStatus] = useState<FASyncStatus | null>(null);
   const [filterSource, setFilterSource] = useState('all'); // for filtering view
 
-  // --- DERIVED STATE (useMemo) ---
-  const filteredItems = useMemo(() => {
-    let filtered = items;
-    if (filterSource !== 'all') {
-      filtered = filtered.filter(item => item.source === filterSource);
-    }
-    if (filterRating !== 'all') {
-      if (filterRating === 's') {
-        filtered = filtered.filter(item => item.rating === 's');
-      } else if (filterRating === 'q') {
-        filtered = filtered.filter(item => item.rating === 'q');
-      } else if (filterRating === 'e') {
-        filtered = filtered.filter(item => item.rating === 'e');
-      } else if (filterRating === 'nsfw') {
-        // Includes both Questionable and Explicit
-        filtered = filtered.filter(item => item.rating === 'q' || item.rating === 'e');
-      }
-    }
-    if (searchTags.trim()) {
-      const searchTerms = searchTags.toLowerCase().split(' ').filter(t => t);
-      filtered = filtered.filter(item => searchTerms.every(term => item.tags?.some(tag => tag.toLowerCase().includes(term))));
-    }
-    if (selectedTags.length > 0) {
-      filtered = filtered.filter(item => selectedTags.every(tag => item.tags?.includes(tag)));
-    }
-    if (sortOrder === 'random') return [...filtered].sort(() => Math.random() - 0.5);
-    if (sortOrder === 'score') return [...filtered].sort((a, b) => (b.score?.total || 0) - (a.score?.total || 0));
-    if (sortOrder === 'newest') return [...filtered].sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
-    if (sortOrder === 'oldest') return [...filtered].sort((a, b) => new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime());
-    return filtered;
-  }, [items, searchTags, selectedTags, sortOrder, filterSource, filterRating]);
+  const filteredItems = items; 
 
   const currentItem = filteredItems[currentIndex];
   const ext = (currentItem?.ext || "").toLowerCase();
@@ -137,11 +108,24 @@ export default function FavoritesViewer() {
   const loadData = async (append = false) => {
     try {
       const offset = append ? items.length : 0;
-      const rows = await invoke<ItemDto[]>("list_items", { limit: itemsPerPage, offset });
+      const combinedSearch = [searchTags, ...selectedTags].join(" ").trim();
+      const rows = await invoke<ItemDto[]>("list_items", { 
+        limit: itemsPerPage, 
+        offset,
+        search: combinedSearch,  // Text input
+        rating: filterRating,    // Dropdown
+        source: filterSource,    // Dropdown
+        order: sortOrder         // Dropdown
+      });
+
       if (!append) {
-        const total = await invoke<number>("get_library_stats");
+        // NOTE: get_library_stats needs to be updated to accept filters too 
+        // if you want the "Total" count to match the search results.
+        // For now, let's just keep total DB count or skip it.
+        const total = await invoke<number>("get_library_stats"); 
         setTotalDatabaseItems(total);
       }
+
       setHasMoreItems(rows.length === itemsPerPage);
       
       const mapped = rows.map((r): LibraryItem => ({
@@ -495,6 +479,19 @@ export default function FavoritesViewer() {
     }
   }, [currentIndex, items.length, hasMoreItems, isLoadingMore]);
 
+  // Reload when filters change
+  useEffect(() => {
+    // Debounce searchTags if you want (optional), or just wait for Enter
+    // For dropdowns, we reload immediately
+    if (!initialLoading) {
+      setItems([]); 
+      setHasMoreItems(true);
+      loadData(false);
+    }
+    // Remove sortOrder from here if you want to keep the local sort for small lists
+    // But since we moved sort to backend, include it here:
+  }, [sortOrder, filterRating, filterSource, selectedTags]); 
+
 
   // --- RENDER ---
   return (
@@ -520,7 +517,20 @@ export default function FavoritesViewer() {
               <div className="flex gap-4 items-center flex-wrap">
                 <div className="flex-1 min-w-[200px] relative">
                   <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
-                  <input type="text" placeholder="Search tags..." value={searchTags} onChange={(e) => setSearchTags(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded focus:outline-none focus:border-purple-500" />
+                  <input
+                    type="text"
+                    placeholder="Search tags (e.g. fox -male rating:s)"
+                    value={searchTags}
+                    onChange={(e) => setSearchTags(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        setItems([]); // Clear current list
+                        setHasMoreItems(true);
+                        loadData(false); // Reload from DB with new query
+                      }
+                    }}
+                    className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded focus:outline-none focus:border-purple-500"
+                  />
                 </div>
                 <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value)} className="px-4 py-2 bg-gray-800 border border-gray-700 rounded focus:outline-none focus:border-purple-500">
                   <option value="default">Default Order</option>

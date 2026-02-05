@@ -858,98 +858,138 @@ pub fn get_library_stats(app: tauri::AppHandle) -> Result<u32, String> {
 
 #[tauri::command]
 pub fn list_items(
-    app: tauri::AppHandle,  // <-- ADD THIS
-    limit: Option<u32>, 
-    offset: Option<u32>
+    app: tauri::AppHandle,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    search: Option<String>, // Tag search only
+    rating: Option<String>, // 's', 'q', 'e', or 'nsfw'
+    source: Option<String>, // 'e621', 'furaffinity', or 'all'
+    order: Option<String>,  // 'newest', 'oldest', 'score', 'random'
 ) -> Result<Vec<ItemDto>, String> {
-  let limit = limit.unwrap_or(100);
-  let offset = offset.unwrap_or(0);
-  let root = get_root(&app)?;  // <-- Now 'app' exists
-  let conn = db::open(&library::db_path(&root))?;
+    let limit = limit.unwrap_or(100);
+    let offset = offset.unwrap_or(0);
+    let search_query = search.unwrap_or_default();
+    let rating_filter = rating.unwrap_or("all".to_string());
+    let source_filter = source.unwrap_or("all".to_string());
+    let sort_order = order.unwrap_or("newest".to_string());
 
-  let mut stmt = conn.prepare(
-    r#"
-    SELECT
-      i.item_id,
-      i.source,
-      i.source_id,
-      i.remote_url,
-      i.file_rel,
-      i.ext,
-      i.rating,
-      i.fav_count,
-      i.score_total,
-      i.created_at,
-      i.added_at,
+    let root = get_root(&app)?;
+    let conn = db::open(&library::db_path(&root))?;
 
-      COALESCE((
-        SELECT GROUP_CONCAT(t.name, char(9))
-        FROM tags t
-        JOIN item_tags it ON it.tag_id = t.tag_id
-        WHERE it.item_id = i.item_id
-      ), '') AS tags,
+    // Base SQL
+    let mut sql = String::from(
+        r#"
+        SELECT
+          i.item_id, i.source, i.source_id, i.remote_url, i.file_rel, i.ext,
+          i.rating, i.fav_count, i.score_total, i.created_at, i.added_at,
+          (SELECT GROUP_CONCAT(t.name, char(9)) FROM item_tags it JOIN tags t ON it.tag_id = t.tag_id WHERE it.item_id = i.item_id),
+          (SELECT GROUP_CONCAT(t.name, char(9)) FROM item_tags it JOIN tags t ON it.tag_id = t.tag_id WHERE it.item_id = i.item_id AND t.type = 'artist'),
+          (SELECT GROUP_CONCAT(s.url, char(9)) FROM item_sources isrc JOIN sources s ON isrc.source_row_id = s.source_row_id WHERE isrc.item_id = i.item_id)
+        FROM items i
+        WHERE i.trashed_at IS NULL
+        "#
+    );
 
-      COALESCE((
-        SELECT GROUP_CONCAT(t.name, char(9))
-        FROM tags t
-        JOIN item_tags it ON it.tag_id = t.tag_id
-        WHERE it.item_id = i.item_id AND t.type = 'artist'
-      ), '') AS artists,
+    let mut params_store: Vec<String> = vec![]; 
+    let mut where_clauses: Vec<String> = vec![];
 
-      COALESCE((
-        SELECT GROUP_CONCAT(s.url, char(9))
-        FROM sources s
-        JOIN item_sources isrc ON isrc.source_row_id = s.source_row_id
-        WHERE isrc.item_id = i.item_id
-      ), '') AS sources
-
-    FROM items i
-    WHERE i.trashed_at IS NULL
-    ORDER BY i.added_at DESC
-    LIMIT ? OFFSET ?
-    "#
-  ).map_err(|e| e.to_string())?;
-
-  let rows = stmt
-    .query_map([limit, offset], |r: &Row| {  // <-- PASS LIMIT AND OFFSET HERE
-      let file_rel: String = r.get(4)?;
-      let file_abs = root.join(&file_rel);
-      let _ext: Option<String> = r.get(5)?;
-
-      let split_tab = |s: String| -> Vec<String> {
-        if s.is_empty() {
-          vec![]
+    // --- 1. RATING FILTER ---
+    if rating_filter != "all" {
+        if rating_filter == "nsfw" {
+            where_clauses.push("(i.rating = 'q' OR i.rating = 'e')".to_string());
         } else {
-          s.split('\t').map(|x| x.to_string()).collect()
+            params_store.push(rating_filter);
+            where_clauses.push(format!("i.rating = ?{}", params_store.len()));
         }
-      };
+    }
 
-      Ok(ItemDto {
-        item_id: r.get(0)?,
-        source: r.get(1)?,
-        source_id: r.get(2)?,
-        remote_url: r.get(3)?,
-        file_abs: file_abs.to_string_lossy().to_string(),
-        ext: r.get(5)?,
+    // --- 2. SOURCE FILTER ---
+    if source_filter != "all" {
+        params_store.push(source_filter);
+        where_clauses.push(format!("i.source = ?{}", params_store.len()));
+    }
 
-        rating: r.get(6)?,
-        fav_count: r.get(7)?,
-        score_total: r.get(8)?,
-        timestamp: r.get(9)?,
-        added_at: r.get(10)?,
+    // --- 3. TAG SEARCH ---
+    let terms: Vec<&str> = search_query.split_whitespace().collect();
+    for term in terms {
+        if term.starts_with("-") {
+            let tag = term.trim_start_matches("-").to_lowercase();
+            params_store.push(tag);
+            where_clauses.push(format!(
+                "NOT EXISTS (SELECT 1 FROM item_tags it JOIN tags t ON it.tag_id = t.tag_id WHERE it.item_id = i.item_id AND t.name = ?{})", 
+                params_store.len()
+            ));
+        } else {
+            let tag = term.to_lowercase();
+            if tag.contains("*") {
+                let like_tag = tag.replace("*", "%");
+                params_store.push(like_tag);
+                where_clauses.push(format!(
+                    "EXISTS (SELECT 1 FROM item_tags it JOIN tags t ON it.tag_id = t.tag_id WHERE it.item_id = i.item_id AND t.name LIKE ?{})", 
+                    params_store.len()
+                ));
+            } else {
+                params_store.push(tag);
+                where_clauses.push(format!(
+                    "EXISTS (SELECT 1 FROM item_tags it JOIN tags t ON it.tag_id = t.tag_id WHERE it.item_id = i.item_id AND t.name = ?{})", 
+                    params_store.len()
+                ));
+            }
+        }
+    }
 
-        tags: split_tab(r.get(11)?),
-        artists: split_tab(r.get(12)?),
-        sources: split_tab(r.get(13)?),
-      })
-    })
-    .map_err(|e| e.to_string())?;
+    // --- APPLY WHERE ---
+    if !where_clauses.is_empty() {
+        sql.push_str(" AND ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
 
-  let mut out = vec![];
-  for row in rows {
-    out.push(row.map_err(|e| e.to_string())?);
-  }
-  Ok(out)
+    // --- 4. ORDERING ---
+    let order_clause = match sort_order.as_str() {
+        "score" => "ORDER BY i.score_total DESC",
+        "favs" | "favcount" => "ORDER BY i.fav_count DESC",
+        "random" => "ORDER BY RANDOM()",
+        "oldest" => "ORDER BY i.added_at ASC",
+        _ => "ORDER BY i.added_at DESC", // Default 'newest'
+    };
+
+    sql.push_str(&format!(" {} LIMIT {} OFFSET {}", order_clause, limit, offset));
+
+    // Prepare & Execute
+    let db_params: Vec<&dyn rusqlite::ToSql> = params_store.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    
+    let rows = stmt.query_map(&*db_params, |r| {
+        let file_rel: String = r.get(4)?;
+        let file_abs = root.join(&file_rel);
+        
+        let split_tab = |s: String| -> Vec<String> {
+            if s.is_empty() { vec![] } else { s.split('\t').map(|x| x.to_string()).collect() }
+        };
+
+        Ok(ItemDto {
+            item_id: r.get(0)?,
+            source: r.get(1)?,
+            source_id: r.get(2)?,
+            remote_url: r.get(3)?,
+            file_abs: file_abs.to_string_lossy().to_string(),
+            ext: r.get(5)?,
+            rating: r.get(6)?,
+            fav_count: r.get(7)?,
+            score_total: r.get(8)?,
+            timestamp: r.get(9)?,
+            added_at: r.get(10)?,
+            tags: split_tab(r.get(11).unwrap_or_default()),
+            artists: split_tab(r.get(12).unwrap_or_default()),
+            sources: split_tab(r.get(13).unwrap_or_default()),
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut out = vec![];
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 fn upsert_tag(conn: &Connection, name: &str, tag_type: &str) -> Result<i64, String> {
