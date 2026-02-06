@@ -968,6 +968,67 @@ pub fn get_library_stats(app: tauri::AppHandle) -> Result<u32, String> {
 }
 
 #[tauri::command]
+pub fn update_item_rating(app: tauri::AppHandle, item_id: i64, rating: String) -> Result<(), String> {
+    let root = get_root(&app)?;
+    let conn = db::open(&library::db_path(&root))?;
+    
+    // rating must be 's', 'q', or 'e'
+    let r = match rating.to_lowercase().as_str() {
+        "s" | "safe" => "s",
+        "q" | "questionable" => "q",
+        "e" | "explicit" => "e",
+        _ => return Err("Invalid rating".into()),
+    };
+
+        // Convert ID to string first so it lives long enough
+    let id_str = item_id.to_string();
+    
+    conn.execute(
+        "UPDATE items SET rating = ? WHERE item_id = ?",
+        rusqlite::params![r, id_str],
+    ).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_item_sources(app: tauri::AppHandle, item_id: i64, sources: Vec<String>) -> Result<(), String> {
+    let root = get_root(&app)?;
+    let mut conn = db::open(&library::db_path(&root))?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // 1. Unlink all existing sources for this item
+    tx.execute("DELETE FROM item_sources WHERE item_id = ?", [item_id])
+        .map_err(|e| e.to_string())?;
+
+    // 2. Add new sources
+    for url in sources {
+        let clean_url = url.trim();
+        if clean_url.is_empty() { continue; }
+
+        // Insert Source URL if new
+        tx.execute("INSERT OR IGNORE INTO sources (url) VALUES (?)", [clean_url])
+            .map_err(|e| e.to_string())?;
+        
+        // Get Source ID
+        let source_row_id: i64 = tx.query_row(
+            "SELECT source_row_id FROM sources WHERE url = ?", 
+            [clean_url], 
+            |r| r.get(0)
+        ).map_err(|e| e.to_string())?;
+
+        // Link
+        tx.execute(
+            "INSERT INTO item_sources (item_id, source_row_id) VALUES (?, ?)", 
+            [item_id, source_row_id]
+        ).map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn list_items(
     app: tauri::AppHandle,
     limit: Option<u32>,

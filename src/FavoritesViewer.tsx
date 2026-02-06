@@ -96,6 +96,10 @@ export default function FavoritesViewer() {
   const [filterRating, setFilterRating] = useState('all');
   const [showTrashModal, setShowTrashModal] = useState(false);
   const [trashedItems, setTrashedItems] = useState<LibraryItem[]>([]);
+  const [showEditModal, setShowEditModal] = useState(false); // Was showTagModal
+  const [editingSources, setEditingSources] = useState<string[]>([]); // NEW
+  const [editingRating, setEditingRating] = useState("s");            // NEW
+  const [newSourceInput, setNewSourceInput] = useState("");           // NEW
 
 
   // FurAffinity
@@ -487,7 +491,41 @@ export default function FavoritesViewer() {
     await invoke("empty_trash");
     setTrashedItems([]);
   };
+  const openEditModal = () => {
+    if (!currentItem) return;
+    setEditingTags([...(currentItem.tags || [])]);
+    setEditingSources([...(currentItem.sources || [])]);
+    setEditingRating(currentItem.rating || "s");
+    setNewTagInput("");
+    setNewSourceInput("");
+    setShowEditModal(true);
+  };
 
+  const saveMetadata = async () => {
+    if (!currentItem) return;
+    try {
+      // 1. Save Tags
+      await invoke("update_item_tags", { itemId: currentItem.item_id, tags: editingTags });
+      
+      // 2. Save Rating
+      await invoke("update_item_rating", { itemId: currentItem.item_id, rating: editingRating });
+      
+      // 3. Save Sources
+      await invoke("update_item_sources", { itemId: currentItem.item_id, sources: editingSources });
+
+      // Update Local State
+      setItems(prev => prev.map(item => 
+        item.item_id === currentItem.item_id 
+          ? { ...item, tags: editingTags, rating: editingRating, sources: editingSources } 
+          : item
+      ));
+
+      setShowEditModal(false);
+    } catch (error) {
+      console.error("Failed to save metadata:", error);
+      alert("Failed to save: " + String(error));
+    }
+  };
   // --- EFFECTS ---
   // Build allTags whenever items change
   useEffect(() => {
@@ -852,13 +890,9 @@ export default function FavoritesViewer() {
                         <div className="flex flex-wrap gap-2 items-center">
                           {/* NEW EDIT BUTTON */}
                           <button
-                            onClick={() => {
-                              setEditingTags([...(currentItem.tags || [])]);
-                              setNewTagInput("");
-                              setShowTagModal(true);
-                            }}
+                            onClick={openEditModal}
                             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 hover:text-white transition-colors"
-                            title="Edit Tags"
+                            title="Edit Post"
                           >
                             <Pencil className="w-3.5 h-3.5" />
                           </button>
@@ -1278,82 +1312,136 @@ export default function FavoritesViewer() {
         </div>
       )}
       {/* Edit Tags Modal */}
-      {showTagModal && (
+      {showEditModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/60" onClick={() => setShowTagModal(false)} />
-          <div className="relative z-10 w-full max-w-lg bg-gray-800 border border-gray-700 rounded-lg p-6 flex flex-col max-h-[80vh]">
-            <h2 className="text-xl font-bold mb-4">Edit Tags</h2>
+          <div className="absolute inset-0 bg-black/60" onClick={() => setShowEditModal(false)} />
+          <div className="relative z-10 w-full max-w-2xl max-h-[90vh] bg-gray-800 border border-gray-700 rounded-lg flex flex-col shadow-2xl">
             
-            {/* Input */}
-            <div className="flex gap-2 mb-4">
-              <input
-                type="text"
-                placeholder="Add a tag..."
-                value={newTagInput}
-                onChange={(e) => setNewTagInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && newTagInput.trim()) {
-                    e.preventDefault();
-                    const tag = newTagInput.trim().toLowerCase();
-                    if (!editingTags.includes(tag)) {
-                      setEditingTags([...editingTags, tag]);
-                    }
-                    setNewTagInput("");
-                  }
-                }}
-                className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500"
-                autoFocus
-              />
-              <button
-                onClick={() => {
-                  if (newTagInput.trim()) {
-                    const tag = newTagInput.trim().toLowerCase();
-                    if (!editingTags.includes(tag)) {
-                      setEditingTags([...editingTags, tag]);
-                    }
-                    setNewTagInput("");
-                  }
-                }}
-                className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded"
-              >
-                Add
+            {/* Header */}
+            <div className="flex items-center justify-between p-5 border-b border-gray-700">
+              <h2 className="text-xl font-bold">Edit Post Metadata</h2>
+              <button onClick={() => setShowEditModal(false)} className="text-gray-400 hover:text-white">
+                <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Tag List */}
-            <div className="flex-1 overflow-y-auto p-2 bg-gray-900/50 rounded border border-gray-700 mb-4 content-start">
-              <div className="flex flex-wrap gap-2">
-                {editingTags.map(tag => (
-                  <span key={tag} className="px-2 py-1 bg-purple-900/50 border border-purple-500/30 rounded text-sm flex items-center gap-1">
-                    {tag}
-                    <button
-                      onClick={() => setEditingTags(editingTags.filter(t => t !== tag))}
-                      className="hover:text-red-400"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </span>
-                ))}
-                {editingTags.length === 0 && (
-                  <div className="text-gray-500 italic text-sm p-2">No tags yet.</div>
-                )}
+            {/* Scrollable Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              
+              {/* Rating Section */}
+              <div>
+                <h3 className="text-sm font-semibold text-gray-400 mb-2 uppercase tracking-wider">Rating</h3>
+                <div className="flex gap-4">
+                  {['s', 'q', 'e'].map(r => (
+                    <label key={r} className="flex items-center gap-2 cursor-pointer">
+                      <input 
+                        type="radio" 
+                        name="rating" 
+                        checked={editingRating === r} 
+                        onChange={() => setEditingRating(r)}
+                        className="w-4 h-4 text-purple-600 bg-gray-700 border-gray-600 focus:ring-purple-500"
+                      />
+                      <span className="capitalize">{r === 's' ? 'Safe' : r === 'q' ? 'Questionable' : 'Explicit'}</span>
+                    </label>
+                  ))}
+                </div>
               </div>
+
+              {/* Sources Section */}
+              <div>
+                <h3 className="text-sm font-semibold text-gray-400 mb-2 uppercase tracking-wider">Sources</h3>
+                <div className="flex gap-2 mb-2">
+                  <input
+                    type="text"
+                    placeholder="Paste URL..."
+                    value={newSourceInput}
+                    onChange={(e) => setNewSourceInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && newSourceInput.trim()) {
+                        e.preventDefault();
+                        if (!editingSources.includes(newSourceInput.trim())) {
+                          setEditingSources([...editingSources, newSourceInput.trim()]);
+                        }
+                        setNewSourceInput("");
+                      }
+                    }}
+                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500 text-sm"
+                  />
+                  <button
+                    onClick={() => {
+                      if (newSourceInput.trim()) {
+                        setEditingSources([...editingSources, newSourceInput.trim()]);
+                        setNewSourceInput("");
+                      }
+                    }}
+                    className="px-3 py-2 bg-gray-600 hover:bg-gray-500 rounded text-sm"
+                  >
+                    Add
+                  </button>
+                </div>
+                <div className="space-y-1">
+                  {editingSources.map((src, i) => (
+                    <div key={i} className="flex items-center justify-between bg-gray-900/50 px-3 py-2 rounded border border-gray-700">
+                      <a href={src} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:underline truncate mr-2">{src}</a>
+                      <button onClick={() => setEditingSources(prev => prev.filter(s => s !== src))} className="text-gray-500 hover:text-red-400">
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                  {editingSources.length === 0 && <p className="text-xs text-gray-500 italic">No sources linked.</p>}
+                </div>
+              </div>
+
+              {/* Tags Section */}
+              <div>
+                <h3 className="text-sm font-semibold text-gray-400 mb-2 uppercase tracking-wider">Tags</h3>
+                <div className="flex gap-2 mb-2">
+                  <input
+                    type="text"
+                    placeholder="Add tag..."
+                    value={newTagInput}
+                    onChange={(e) => setNewTagInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && newTagInput.trim()) {
+                        e.preventDefault();
+                        const t = newTagInput.trim().toLowerCase();
+                        if (!editingTags.includes(t)) setEditingTags([...editingTags, t]);
+                        setNewTagInput("");
+                      }
+                    }}
+                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-purple-500 text-sm"
+                  />
+                  <button
+                    onClick={() => {
+                      if (newTagInput.trim()) {
+                        const t = newTagInput.trim().toLowerCase();
+                        if (!editingTags.includes(t)) setEditingTags([...editingTags, t]);
+                        setNewTagInput("");
+                      }
+                    }}
+                    className="px-3 py-2 bg-gray-600 hover:bg-gray-500 rounded text-sm"
+                  >
+                    Add
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2 p-3 bg-gray-900/50 rounded border border-gray-700 min-h-[100px] content-start">
+                  {editingTags.map(tag => (
+                    <span key={tag} className="px-2 py-1 bg-purple-900/30 border border-purple-500/30 rounded text-sm flex items-center gap-1">
+                      {tag}
+                      <button onClick={() => setEditingTags(prev => prev.filter(t => t !== tag))} className="hover:text-red-400 ml-1">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+
             </div>
 
             {/* Footer */}
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowTagModal(false)}
-                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={saveTags}
-                className="px-6 py-2 bg-purple-600 hover:bg-purple-700 rounded font-medium"
-              >
-                Save Tags
-              </button>
+            <div className="flex justify-end gap-2 p-5 border-t border-gray-700">
+              <button onClick={() => setShowEditModal(false)} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded">Cancel</button>
+              <button onClick={saveMetadata} className="px-6 py-2 bg-purple-600 hover:bg-purple-700 rounded font-bold">Save Changes</button>
             </div>
           </div>
         </div>
