@@ -51,7 +51,6 @@ TailBurrow uses a **"Hybrid Upgrade"** strategy to ensure the best possible meta
 ## 🗺️ Roadmap
 
 *   **Performance:** Switch library view to a virtualized masonry grid with cached thumbnails for massive collections.
-*   **Advanced Filters:** Filter by file type (image/video/gif).
 *   **Metadata Editor:** Tools to manually edit sources and ratings for imported items.
 *   **More Sources:** Support for Twitter/X and Bluesky archiving.
 

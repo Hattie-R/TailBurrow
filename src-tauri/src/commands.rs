@@ -1023,14 +1023,54 @@ pub fn list_items(
     // --- 3. TAG SEARCH ---
     let terms: Vec<&str> = search_query.split_whitespace().collect();
     for term in terms {
-        if term.starts_with("-") {
+        // --- 1. NEGATED TYPE (-type:image) ---
+        if term.starts_with("-type:") {
+            let val = term.replace("-type:", "").to_lowercase();
+            match val.as_str() {
+                "image" | "img" => where_clauses.push("NOT (i.ext IN ('jpg', 'jpeg', 'png', 'webp'))".to_string()),
+                "video" | "vid" => where_clauses.push("NOT (i.ext IN ('mp4', 'webm'))".to_string()),
+                "gif" => where_clauses.push("i.ext != 'gif'".to_string()),
+                _ => {}
+            }
+        }
+        // --- 2. POSITIVE TYPE (type:video) ---
+        else if term.starts_with("type:") {
+            let val = term.replace("type:", "").to_lowercase();
+            match val.as_str() {
+                "image" | "img" => where_clauses.push("(i.ext IN ('jpg', 'jpeg', 'png', 'webp'))".to_string()),
+                "video" | "vid" => where_clauses.push("(i.ext IN ('mp4', 'webm'))".to_string()),
+                "gif" => where_clauses.push("(i.ext = 'gif')".to_string()),
+                _ => {}
+            }
+        }
+        // --- 3. NEGATED EXTENSION (-ext:png) ---
+        else if term.starts_with("-ext:") {
+            let val = term.replace("-ext:", "").to_lowercase();
+            params_store.push(val);
+            where_clauses.push(format!("i.ext != ?{}", params_store.len()));
+        }
+        // --- 4. POSITIVE EXTENSION (ext:png) ---
+        else if term.starts_with("ext:") {
+            let val = term.replace("ext:", "").to_lowercase();
+            params_store.push(val);
+            where_clauses.push(format!("i.ext = ?{}", params_store.len()));
+        }
+        // --- 5. META TAGS (rating, source, order - ignored here, handled by params) ---
+        // We skip these so they don't get treated as generic tags
+        else if term.starts_with("rating:") || term.starts_with("source:") || term.starts_with("order:") {
+            continue;
+        }
+        // --- 6. NEGATED TAG (-tag) ---
+        else if term.starts_with("-") {
             let tag = term.trim_start_matches("-").to_lowercase();
             params_store.push(tag);
             where_clauses.push(format!(
                 "NOT EXISTS (SELECT 1 FROM item_tags it JOIN tags t ON it.tag_id = t.tag_id WHERE it.item_id = i.item_id AND t.name = ?{})", 
                 params_store.len()
             ));
-        } else {
+        }
+        // --- 7. REGULAR TAG (tag) ---
+        else {
             let tag = term.to_lowercase();
             if tag.contains("*") {
                 let like_tag = tag.replace("*", "%");
