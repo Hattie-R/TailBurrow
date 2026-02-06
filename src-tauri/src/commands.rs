@@ -742,7 +742,7 @@ pub fn fa_set_credentials(app: tauri::AppHandle, a: String, b: String) -> Result
 }
 
 #[tauri::command]
-pub fn fa_start_sync(app: tauri::AppHandle) -> Result<(), String> {
+pub fn fa_start_sync(app: tauri::AppHandle, limit: Option<u32>) -> Result<(), String> {
     // Load creds
     let path = app.path().app_config_dir().map_err(|e| e.to_string())?.join("fa_creds.json");
     if !path.exists() { return Err("No credentials set".into()); }
@@ -753,8 +753,10 @@ pub fn fa_start_sync(app: tauri::AppHandle) -> Result<(), String> {
     let a = json["a"].as_str().unwrap_or("").to_string();
     let b = json["b"].as_str().unwrap_or("").to_string();
 
+    let stop_after = limit.unwrap_or(0); // 0 = unlimited
+
     tauri::async_runtime::spawn(async move {
-        crate::fa::run_sync(app, a, b).await;
+        crate::fa::run_sync(app, a, b, stop_after).await;
     });
 
     Ok(())

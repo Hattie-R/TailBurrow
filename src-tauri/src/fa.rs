@@ -113,7 +113,7 @@ async fn check_e621_md5(client: &reqwest::Client, hash: &str) -> Option<E621Post
 
 // --- Main Logic ---
 
-pub async fn run_sync(app: AppHandle, cookie_a: String, cookie_b: String) {
+pub async fn run_sync(app: AppHandle, cookie_a: String, cookie_b: String, stop_after: u32) {
     let state = app.state::<FAState>();
     
     {
@@ -454,8 +454,20 @@ pub async fn run_sync(app: AppHandle, cookie_a: String, cookie_b: String) {
 
             let mut s = state.status.lock().unwrap();
             s.imported += 1;
-        }
 
+            if stop_after > 0 {
+                let s = state.status.lock().unwrap();
+                if (s.imported + s.upgraded) >= stop_after {
+                    break; // Break inner loop
+                }
+            }
+        }
+        if stop_after > 0 {
+            let s = state.status.lock().unwrap();
+            if (s.imported + s.upgraded) >= stop_after {
+                break; 
+            }
+        }
         page += 1;
         if page > 50 { break; } 
     }
