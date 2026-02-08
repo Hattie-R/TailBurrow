@@ -575,18 +575,25 @@ export default function FavoritesViewer() {
       // 2. Global Shortcuts
       if (e.key === "Escape") {
         e.preventDefault();
-        if (showSettings) {
-          setShowSettings(false);
-          return;
-        }
-        if (showTagModal) {
-          setShowTagModal(false);
-          return;
-        }
+        
+        // Priority 1: Close Modals
+        if (showSettings) { setShowSettings(false); return; }
+        if (showTagModal) { setShowTagModal(false); return; }
+        if (showTrashModal) { setShowTrashModal(false); return; }
+        if (showAddFeedModal) { setShowAddFeedModal(false); return; } // Add this if missing
+
+        // Priority 2: Close Fullscreen Overlay
         if (viewerOverlay) {
           pokeHud();
           if (document.fullscreenElement) document.exitFullscreen();
           setViewerOverlay(false);
+          return;
+        }
+
+        // Priority 3: Go Back to Grid (NEW)
+        if (viewMode === 'single') {
+          setViewMode('grid');
+          return;
         }
       }
 
@@ -793,7 +800,6 @@ export default function FavoritesViewer() {
                         onClick={() => {
                           setCurrentIndex(index);
                           setViewMode('single');
-                          setViewerOverlay(true); 
                         }}
                         className="relative group cursor-pointer bg-gray-800 rounded-lg overflow-hidden border border-gray-700 hover:border-purple-500 transition-all"
                       >
