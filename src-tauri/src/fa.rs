@@ -333,6 +333,9 @@ pub async fn run_sync(app: AppHandle, cookie_a: String, cookie_b: String, stop_a
                         let _ = file.write_all(&e621_bytes);
                     }
 
+                    let file_rel_for_thumb = format!("media/{}", filename);
+                    crate::commands::generate_and_save_thumb(&root, &file_rel_for_thumb);
+
                     let now = chrono::Local::now().to_rfc3339();
                     let file_rel = format!("media/{}", filename);
                     let tx = conn.unchecked_transaction().unwrap();

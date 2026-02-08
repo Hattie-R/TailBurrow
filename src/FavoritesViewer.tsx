@@ -94,7 +94,6 @@ export default function FavoritesViewer() {
   const [showTagModal, setShowTagModal] = useState(false);
   const [editingTags, setEditingTags] = useState<string[]>([]);
   const [newTagInput, setNewTagInput] = useState("");
-  const [filterRating, setFilterRating] = useState('all');
   const [showTrashModal, setShowTrashModal] = useState(false);
   const [trashedItems, setTrashedItems] = useState<LibraryItem[]>([]);
   const [showEditModal, setShowEditModal] = useState(false); // Was showTagModal
@@ -126,7 +125,6 @@ export default function FavoritesViewer() {
         limit: itemsPerPage, 
         offset,
         search: combinedSearch,  // Text input
-        rating: filterRating,    // Dropdown
         source: filterSource,    // Dropdown
         order: sortOrder         // Dropdown
       });
@@ -376,7 +374,7 @@ export default function FavoritesViewer() {
     const [coords, setCoords] = useState<{ x: number; y: number } | null>(null);
     const iconRef = useRef<HTMLDivElement>(null);
     const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    
+
     // --- HANDLERS ---
 
     const handleEnter = () => {
@@ -693,7 +691,7 @@ export default function FavoritesViewer() {
     }
     // Remove sortOrder from here if you want to keep the local sort for small lists
     // But since we moved sort to backend, include it here:
-  }, [sortOrder, filterRating, filterSource, selectedTags]); 
+  }, [sortOrder, filterSource, selectedTags]); 
 
 
   // --- RENDER ---
@@ -715,8 +713,8 @@ export default function FavoritesViewer() {
       {/* Viewer Tab */}
       {activeTab === 'viewer' && (
         <>
-          <div className="border-b border-gray-700 p-4">
-            <div className="max-w-7xl mx-auto">
+          <div className="border-b border-gray-700">
+            <div className="max-w-7xl mx-auto p-4">
               <div className="flex gap-4 items-center flex-wrap">
                 <div className="flex-1 min-w-[200px] relative">
                   <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
@@ -741,17 +739,6 @@ export default function FavoritesViewer() {
                   <option value="score">By Score</option>
                   <option value="newest">Newest First</option>
                   <option value="oldest">Oldest First</option>
-                </select>
-                <select
-                  value={filterRating}
-                  onChange={(e) => setFilterRating(e.target.value)}
-                  className="px-4 py-2 bg-gray-800 border border-gray-700 rounded focus:outline-none focus:border-purple-500"
-                >
-                  <option value="all">All Ratings</option>
-                  <option value="s">Safe</option>
-                  <option value="q">Questionable</option>
-                  <option value="e">Explicit</option>
-                  <option value="nsfw">All NSFW (Q+E)</option>
                 </select>
                 <select 
                   value={filterSource} 

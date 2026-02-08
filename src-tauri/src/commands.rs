@@ -284,7 +284,7 @@ pub fn add_e621_post(app: AppHandle, post: E621PostInput) -> Result<Status, Stri
   let client = reqwest::blocking::Client::new();
   let mut resp = client
     .get(&post.file_url)
-    .header("User-Agent", "Guacamole Viewer/0.1.0 (local archiver)")
+    .header("User-Agent", "TailBurrow/0.2.1 (local archiver)")
     .send()
     .map_err(|e| e.to_string())?;
 
@@ -298,7 +298,11 @@ pub fn add_e621_post(app: AppHandle, post: E621PostInput) -> Result<Status, Stri
 
   fs::rename(&tmp_path, &dest_path).map_err(|e| e.to_string())?;
 
+  // --- NEW: Generate Thumbnail Immediately ---
   let file_rel = format!("media/{}", filename.replace('\\', "/"));
+  generate_and_save_thumb(&root, &file_rel); // <--- Added this call
+  // -------------------------------------------
+
   let added_at = Utc::now().to_rfc3339();
 
   conn.execute(
@@ -419,7 +423,7 @@ pub fn e621_test_connection(app: AppHandle) -> Result<Status, String> {
   let resp = client
     .get("https://e621.net/posts.json")
     .basic_auth(username, Some(api_key))
-    .header("User-Agent", "Guacamole Viewer/0.1.0 (test)")
+    .header("User-Agent", "TailBurrow/0.2.1 (test)")
     .query(&[("limit", "1"), ("tags", "order:id_desc")])
     .send()
     .map_err(|e| e.to_string())?;
@@ -441,7 +445,7 @@ pub fn e621_fetch_posts(app: AppHandle, tags: String, limit: u32, page: Option<S
   let mut req = client
     .get("https://e621.net/posts.json")
     .basic_auth(username, Some(api_key))
-    .header("User-Agent", "Guacamole Viewer/0.1.0 (feeds)")
+    .header("User-Agent", "TailBurrow/0.2.1 (feeds)")
     .query(&[("tags", tags), ("limit", limit.to_string())]);
 
   if let Some(p) = page {
@@ -541,7 +545,7 @@ pub fn e621_sync_start(
         let resp = client
           .get("https://e621.net/posts.json")
           .basic_auth(&username, Some(&api_key))
-          .header("User-Agent", "Guacamole Viewer/0.1.0 (sync)")
+          .header("User-Agent", "TailBurrow/0.2.1 (sync)")
           .query(&[
             ("tags", tags.as_str()),
             ("limit", "320"),
@@ -719,7 +723,7 @@ pub fn e621_favorite(app: AppHandle, post_id: i64) -> Result<Status, String> {
   let resp = client
     .post("https://e621.net/favorites.json")
     .basic_auth(username, Some(api_key))
-    .header("User-Agent", "Guacamole Viewer/0.1.0 (favorite)")
+    .header("User-Agent", "TailBurrow/0.2.1 (favorite)")
     .header("Content-Type", "application/x-www-form-urlencoded")
     .body(format!("post_id={}", post_id))
     .send()
@@ -1132,7 +1136,30 @@ pub fn list_items(
         }
         // --- 5. META TAGS (rating, source, order - ignored here, handled by params) ---
         // We skip these so they don't get treated as generic tags
-        else if term.starts_with("rating:") || term.starts_with("source:") || term.starts_with("order:") {
+        else if term.starts_with("rating:") {
+            let val = term.replace("rating:", "").to_lowercase();
+            // Map common aliases
+            let r = match val.as_str() {
+                "safe" | "s" => "s",
+                "questionable" | "q" => "q",
+                "explicit" | "e" => "e",
+                _ => "s"
+            };
+            params_store.push(r.to_string());
+            where_clauses.push(format!("i.rating = ?{}", params_store.len()));
+        }
+        else if term.starts_with("-rating:") {
+            let val = term.replace("-rating:", "").to_lowercase();
+            let r = match val.as_str() {
+                "safe" | "s" => "s",
+                "questionable" | "q" => "q",
+                "explicit" | "e" => "e",
+                _ => "s"
+            };
+            params_store.push(r.to_string());
+            where_clauses.push(format!("i.rating != ?{}", params_store.len()));
+        }
+        else if term.starts_with("source:") || term.starts_with("order:") {
             continue;
         }
         // --- 6. NEGATED TAG (-tag) ---
@@ -1217,6 +1244,31 @@ pub fn list_items(
         out.push(row.map_err(|e| e.to_string())?);
     }
     Ok(out)
+}
+
+// Add this helper function
+pub fn generate_and_save_thumb(root: &std::path::Path, file_rel: &str) {
+    let path = root.join(file_rel);
+    let cache_dir = root.join(".cache").join("thumbs");
+    
+    // Create cache dir if missing
+    if !cache_dir.exists() {
+        let _ = std::fs::create_dir_all(&cache_dir);
+    }
+
+    let name_hash = format!("{:x}", md5::compute(file_rel.as_bytes()));
+    let thumb_path = cache_dir.join(format!("{}.jpg", name_hash));
+
+    if thumb_path.exists() { return; }
+
+    // Try to open and resize
+    if let Ok(img) = image::open(&path) {
+        let thumb = img.resize(400, u32::MAX, image::imageops::FilterType::Lanczos3);
+        let mut bytes: Vec<u8> = Vec::new();
+        if thumb.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageOutputFormat::Jpeg(70)).is_ok() {
+            let _ = std::fs::write(thumb_path, &bytes);
+        }
+    }
 }
 
 #[tauri::command]
