@@ -324,20 +324,6 @@ fn categorize_deletion_reason(reason: &str) -> &'static str {
     }
 }
 
-#[derive(Serialize)]
-pub struct DuplicateGroup {
-    pub md5: String,
-    pub items: Vec<DuplicateItem>,
-}
-
-#[derive(Serialize)]
-pub struct DuplicateItem {
-    pub item_id: i64,
-    pub source: String,
-    pub source_id: String,
-    pub file_rel: String,
-    pub ext: String,
-}
 
 #[tauri::command]
 pub fn e621_unavailable_list(app: AppHandle, limit: u32) -> Result<Vec<UnavailableDto>, String> {
@@ -370,6 +356,15 @@ pub fn e621_unavailable_list(app: AppHandle, limit: u32) -> Result<Vec<Unavailab
       out.push(row.map_err(|e| e.to_string())?);
     }
     Ok(out)
+  })
+}
+
+#[tauri::command]
+pub fn e621_clear_unavailable(app: AppHandle) -> Result<(), String> {
+  with_db(&app, |conn| {
+    conn.execute("DELETE FROM unavailable_posts", [])
+      .map_err(|e| e.to_string())?;
+    Ok(())
   })
 }
 
@@ -1272,12 +1267,12 @@ pub fn empty_trash(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn fa_sync_status(state: tauri::State<FAState>) -> FASyncStatus {
-    state.status.lock().unwrap().clone()
+    state.status.lock().clone()
 }
 
 #[tauri::command]
 pub fn fa_cancel_sync(state: tauri::State<FAState>) {
-    *state.should_cancel.lock().unwrap() = true;
+    *state.should_cancel.lock() = true;
 }
 
 #[tauri::command]
@@ -1285,6 +1280,60 @@ pub fn fa_clear_credentials() -> Result<(), String> {
   crate::secrets::delete_secret("fa_cookie_a")?;
   crate::secrets::delete_secret("fa_cookie_b")?;
   Ok(())
+}
+
+// ── Twitter Bookmark Sync ──
+
+#[derive(Serialize)]
+pub struct TwitterCredInfo {
+    pub has_creds: bool,
+}
+
+#[tauri::command]
+pub fn twitter_set_credentials(username: String, password: String) -> Result<(), String> {
+    crate::secrets::set_secret("twitter_username", &username)?;
+    crate::secrets::set_secret("twitter_password", &password)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn twitter_get_cred_info() -> Result<TwitterCredInfo, String> {
+    let has_u = crate::secrets::get_secret("twitter_username")?.is_some();
+    let has_p = crate::secrets::get_secret("twitter_password")?.is_some();
+    Ok(TwitterCredInfo { has_creds: has_u && has_p })
+}
+
+#[tauri::command]
+pub fn twitter_clear_credentials() -> Result<(), String> {
+    crate::secrets::delete_secret("twitter_username")?;
+    crate::secrets::delete_secret("twitter_password")?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn twitter_start_sync(app: tauri::AppHandle, limit: Option<u32>) -> Result<(), String> {
+    let username = crate::secrets::get_secret("twitter_username")?
+        .ok_or("Twitter username not set")?;
+    let password = crate::secrets::get_secret("twitter_password")?
+        .ok_or("Twitter password not set")?;
+
+    let stop_after = limit.unwrap_or(0);
+
+    tauri::async_runtime::spawn(async move {
+        crate::twitter::run_sync(app, username, password, stop_after).await;
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn twitter_sync_status(state: tauri::State<'_, crate::twitter::TwitterState>) -> crate::twitter::TwitterSyncStatus {
+    state.status.lock().clone()
+}
+
+#[tauri::command]
+pub fn twitter_cancel_sync(state: tauri::State<'_, crate::twitter::TwitterState>) {
+    *state.should_cancel.lock() = true;
 }
 
 #[tauri::command]
@@ -2480,56 +2529,6 @@ pub fn prune_expired_trash(app: &tauri::AppHandle) -> Result<(), String> {
 
 // ── Find Duplicates (synchronous) ─────────────────────────────
 
-#[tauri::command]
-pub fn maintenance_find_duplicates(app: AppHandle) -> Result<Vec<DuplicateGroup>, String> {
-    with_db(&app, |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT md5 FROM items \
-             WHERE md5 IS NOT NULL AND md5 != '' AND trashed_at IS NULL \
-             GROUP BY md5 HAVING COUNT(*) > 1"
-        ).map_err(|e| e.to_string())?;
-
-        let md5s: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut groups = Vec::new();
-
-        for md5 in &md5s {
-            let mut item_stmt = conn.prepare(
-                "SELECT item_id, source, source_id, file_rel, COALESCE(ext, '') \
-                 FROM items WHERE md5 = ? AND trashed_at IS NULL \
-                 ORDER BY CASE source \
-                   WHEN 'e621' THEN 0 \
-                   WHEN 'furaffinity' THEN 1 \
-                   ELSE 2 END, \
-                 added_at ASC"
-            ).map_err(|e| e.to_string())?;
-
-            let items: Vec<DuplicateItem> = item_stmt
-                .query_map(params![md5], |row| {
-                    Ok(DuplicateItem {
-                        item_id: row.get(0)?,
-                        source: row.get(1)?,
-                        source_id: row.get(2)?,
-                        file_rel: row.get(3)?,
-                        ext: row.get(4)?,
-                    })
-                })
-                .map_err(|e| e.to_string())?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            if items.len() > 1 {
-                groups.push(DuplicateGroup { md5: md5.clone(), items });
-            }
-        }
-
-        Ok(groups)
-    })
-}
 
 // ── Deleted Check ─────────────────────────────────────────────
 
@@ -3571,7 +3570,6 @@ fn get_image_resolution(path: &std::path::Path) -> i64 {
 pub struct TagSuggestion {
     pub name: String,
     pub tag_type: String,
-    pub count: i64,
 }
 
 #[tauri::command]
@@ -3585,12 +3583,9 @@ pub fn search_tags(app: AppHandle, prefix: String, limit: Option<u32>) -> Result
     with_db(&app, |conn| {
         let pattern = format!("{}%", prefix);
         let mut stmt = conn.prepare(
-            "SELECT t.name, t.type, COUNT(it.item_id) as cnt \
+            "SELECT t.name, t.type \
              FROM tags t \
-             LEFT JOIN item_tags it ON t.tag_id = it.tag_id \
              WHERE t.name LIKE ?1 \
-             GROUP BY t.tag_id \
-             ORDER BY cnt DESC \
              LIMIT ?2"
         ).map_err(|e| e.to_string())?;
 
@@ -3598,7 +3593,6 @@ pub fn search_tags(app: AppHandle, prefix: String, limit: Option<u32>) -> Result
             Ok(TagSuggestion {
                 name: row.get(0)?,
                 tag_type: row.get(1)?,
-                count: row.get(2)?,
             })
         }).map_err(|e| e.to_string())?;
 

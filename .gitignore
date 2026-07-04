@@ -9,7 +9,7 @@ lerna-debug.log*
 
 # ---- Node / Vite ----
 node_modules/
-dist/
+t/dis
 dist-ssr/
 *.local
 
@@ -39,3 +39,15 @@ cache/
 db/
 *.sqlite
 *.sqlite-*
+AGENTS.md
+
+# ---- AI / Agent context files ----
+CLAUDE.md
+.cursorrules
+.windsurfrules
+.github/copilot-instructions.md
+
+# ---- Environment / Secrets ----
+.env
+.env.*
+!.env.example

@@ -29,7 +29,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json", "cookies", "multipart"] }
-scraper = "0.19"
 md5 = "0.7"
 tokio = { version = "1", features = ["time"] }
 image = { version = "0.24", features = ["default", "webp"] }
@@ -40,3 +39,6 @@ rand = "0.8"
 tauri-plugin-updater = "2.10.0"
 aes-gcm = "0.10"
 base64 = "0.22"
+parking_lot = "0.12"
+chromiumoxide = "0.9"
+futures = "0.3"

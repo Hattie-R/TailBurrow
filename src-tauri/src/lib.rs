@@ -1,8 +1,12 @@
+#![recursion_limit = "256"]
 mod commands;
 mod config;
 mod db;
+mod chrome;
 mod library;
+
 pub mod fa; 
+pub mod twitter;
 mod secrets;
 
 use tauri::Manager; 
@@ -16,6 +20,7 @@ pub fn run() {
     .plugin(tauri_plugin_fs::init())
     .manage(Arc::new(Mutex::new(commands::SyncState::default())))
     .manage(Arc::new(commands::MaintenanceState::default()))
+    .manage(crate::twitter::TwitterState::new())
     .manage(crate::fa::FAState::new())
     .manage(crate::db::DbPool::new())
     .setup(|app| {
@@ -54,7 +59,7 @@ pub fn run() {
         }
         // Cancel FA sync
         if let Some(fa_state) = app.try_state::<crate::fa::FAState>() {
-          *fa_state.should_cancel.lock().unwrap() = true;
+          *fa_state.should_cancel.lock() = true;
         }
         // Give threads a moment to finish current operation
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -91,6 +96,7 @@ pub fn run() {
       commands::e621_favorite,
       commands::e621_sync_start,
       commands::e621_sync_status,
+      commands::e621_clear_unavailable,
       commands::e621_sync_cancel,
       commands::e621_unavailable_list,
       commands::has_app_lock,
@@ -111,7 +117,6 @@ pub fn run() {
       commands::clear_pools_cache,
       commands::proxy_remote_media,
       commands::import_local_files,
-      commands::maintenance_find_duplicates,
       commands::maintenance_start_deleted_check,
       commands::maintenance_deleted_check_status,
       commands::maintenance_start_metadata_update,
@@ -123,6 +128,12 @@ pub fn run() {
       commands::search_tags,
       commands::get_post_pools,
       commands::load_app_settings,
+      commands::twitter_set_credentials,
+      commands::twitter_get_cred_info,
+      commands::twitter_clear_credentials,
+      commands::twitter_start_sync,
+      commands::twitter_sync_status,
+      commands::twitter_cancel_sync,
       commands::save_app_settings,
     ])
     .run(tauri::generate_context!())
